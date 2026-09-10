@@ -37,6 +37,17 @@ describe("名单", () => {
 		assert.equal(only?.capabilities?.atAll, "supported");
 	});
 
+	/**
+	 * BN 那头不认得 koishi 后面挂着什么平台,bot 行左边那枚方块画什么只能由这里给
+	 * (协议 §5.2 的 `icon`,只收 data URL)。没图标的平台不报这一格,BN 退回两个字母。
+	 */
+	it("认得的平台带上图标(data URL),不认得的不编一个", () => {
+		const [qq, kook] = botsOf([bot({ platform: "onebot" }), bot({ platform: "kook" })]);
+		assert.match(qq?.icon ?? "", /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+=*$/);
+		assert.ok((qq?.icon ?? "").length < 4096, "一枚图标不该比一条消息还重");
+		assert.equal(kook?.icon, undefined);
+	});
+
 	it("没有显示名就不报这一格,不编一个出来", () => {
 		const [only] = botsOf([bot({ user: undefined })]);
 		assert.equal(only?.name, undefined);
@@ -82,6 +93,7 @@ describe("名单", () => {
 		assert.deepEqual(Object.keys(only ?? {}).sort(), [
 			"botId",
 			"capabilities",
+			"icon",
 			"name",
 			"platform",
 			"selfId",

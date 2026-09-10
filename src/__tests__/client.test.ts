@@ -94,7 +94,7 @@ describe("握手", () => {
 		sockets[0]?.fire("open");
 		assert.deepEqual(sockets[0]?.sent[0], {
 			type: "hello",
-			protocol: { major: 1, minor: 1 },
+			protocol: { major: 1, minor: 2 },
 			bridge: { kind: "koishi", name: "koishi", version: "0.0.1" },
 			bots: BOTS,
 		});

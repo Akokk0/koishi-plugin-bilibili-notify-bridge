@@ -7,6 +7,7 @@
  */
 
 import { capabilitiesFor } from "./capabilities";
+import { PLATFORM_ICONS } from "./platform-icons";
 import type { BridgeBotWire, BridgeCapabilityReport } from "./protocol";
 
 /**
@@ -43,6 +44,9 @@ export function botsOf(
 		// 没有就不报这一格 —— 编一个「未命名」出来,面板上就再也分不出「没名字」和
 		// 「真的叫未命名」。
 		if (bot.user?.name) wire.name = bot.user.name;
+		// 平台图标同理:没有的不报,BN 那头退回平台名的头两个字母。
+		const icon = PLATFORM_ICONS[bot.platform];
+		if (icon) wire.icon = icon;
 		return [wire];
 	});
 }

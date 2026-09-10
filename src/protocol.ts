@@ -11,7 +11,7 @@
  */
 
 /** 判定只看 `major`。加可选字段 / 加帧类型只升 minor;改字段含义或删字段才升 major。 */
-export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 1 } as const;
+export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 2 } as const;
 
 /** 这个桥**必报**的六项能力(协议 §7)。 */
 export const BRIDGE_CAPABILITIES = [
@@ -35,6 +35,8 @@ export interface BridgeBotWire {
 	name?: string;
 	/** 仅用于显示,别拿去当身份比对。 */
 	selfId?: string;
+	/** 平台图标,`data:image/…;base64,` 的 data URL,≤ 32 KB;BN 拿它画 bot 那一行的方块。 */
+	icon?: string;
 	capabilities?: Record<string, string>;
 }
 
