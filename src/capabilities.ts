@@ -1,0 +1,51 @@
+/**
+ * 这个桥**能替某个平台做到什么** —— 握手时逐 bot 报给 BN(协议 §7)。
+ *
+ * 🔴 **硬编,不是探测**:koishi 的 `bot.supports()` 粒度是 Satori 的 **API 方法**,而 @全体 /
+ * 合并转发是**消息元素**;适配器碰到不认识的元素**静默丢弃、不抛错**,连 try/catch 都探不出。
+ *
+ * ⚠️ 所以**每一格都要有依据**,拿不准的一律 `unknown`。报错一格的代价是不对称的:
+ * 谎报 `supported` 的症状是「@全体没生效而且一声不响」,而 `unknown` 只是让面板显示
+ * 「还不知道」—— BN 照样会试。
+ */
+
+import {
+	BRIDGE_CAPABILITIES,
+	type BridgeCapabilityReport,
+	type BridgeCapabilityState,
+} from "./protocol";
+
+/**
+ * @全体:**查过 `@satorijs/adapter-<平台>` 的消息编码器**才写进来。
+ *
+ * - `discord` —— `attrs.type === "all"` → `@everyone`
+ * - `kook` —— `attrs.type === "all"` → `(met)all(met)`
+ * - `telegram` / `qq` —— 编码器里**根本没有 at-all 这一支**,元素会被静默丢掉
+ *
+ * 没列进来的(onebot、lark、slack……)按 `unknown` 走 —— 不是它们做不到,是**我们没查过**。
+ * 加一行之前先去翻那个适配器的编码器。
+ */
+const AT_ALL: Record<string, BridgeCapabilityState> = {
+	discord: "supported",
+	kook: "supported",
+	telegram: "unsupported",
+	qq: "unsupported",
+};
+
+export function capabilitiesFor(platform: string): BridgeCapabilityReport {
+	const report = {} as BridgeCapabilityReport;
+	for (const capability of BRIDGE_CAPABILITIES) report[capability] = "unknown";
+
+	report.atAll = AT_ALL[platform] ?? "unknown";
+	// 入站恒真:这个桥自己就在把消息转回去,与平台无关。
+	report.inbound = "supported";
+	// 🔴 markdown 恒假:这个桥不做 markdown → koishi 元素的转换,而 satori 的 discord
+	// 适配器还会把 markdown 字符**转义掉**。报支持的话群里收到的是一堆反斜杠;报不支持
+	// BN 会在它那侧剥成干净纯文本。
+	report.markdown = "unsupported";
+	// 这三样这一版没实现 —— 答案是「这个桥做不到」,不是「不知道」。
+	report.forward = "unsupported";
+	report.miniAppCard = "unsupported";
+	report.shareCardLinks = "unsupported";
+	return report;
+}
