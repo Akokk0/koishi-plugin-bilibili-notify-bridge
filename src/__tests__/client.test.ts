@@ -54,6 +54,7 @@ function client(over: Partial<Parameters<typeof createBridgeClient>[0]> = {}) {
 			sockets.push(socket);
 			return socket;
 		},
+		url: "ws://bn/ext/bridge",
 		bots: () => BOTS,
 		version: "0.0.1",
 		deliver: async () => ({ ok: true }),
@@ -209,6 +210,53 @@ describe("断了之后", () => {
 		connect();
 		sockets[0]?.fire("close", { code: 4007 });
 		assert.equal(timers.length, 1);
+	});
+
+	/**
+	 * 🔴 **主人 2026-09-10 真机第一次连就撞上这个**:日志里只有一句「连接出错」,没有任何
+	 * 线索。事件里带着真正的原因(`ECONNREFUSED` / `Unexpected server response: 401` …),
+	 * 吞掉它等于让人对着一台连不上的 BN 猜半天。
+	 */
+	it("连不上时把真正的原因说出来,不是一句「连接出错」", () => {
+		const said: string[] = [];
+		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		sockets[0]?.fire("error", { message: "connect ECONNREFUSED 127.0.0.1:8787" });
+		assert.ok(
+			said.some((line) => line.includes("ECONNREFUSED")),
+			`只说了:${said.join(" | ")}`,
+		);
+	});
+
+	it("原因藏在 error 字段里也捞得出来", () => {
+		const said: string[] = [];
+		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		sockets[0]?.fire("error", { error: new Error("getaddrinfo ENOTFOUND nas") });
+		assert.ok(said.some((line) => line.includes("ENOTFOUND")), `只说了:${said.join(" | ")}`);
+	});
+
+	/**
+	 * 🔴 协议 §2:**401 是「别再试了」**。upgrade 被拒时 close code 是 1006(看着像普通断线),
+	 * 照 close code 判的话 token 填错就会**永远捶 BN**,而屏幕上什么有用的都没有。
+	 */
+	it("token 不对(401)→ 就此打住,不去捶 BN", () => {
+		const said: string[] = [];
+		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		sockets[0]?.fire("error", { message: "Unexpected server response: 401" });
+		sockets[0]?.fire("close", { code: 1006 });
+		assert.equal(timers.length, 0, "401 之后还在重连");
+		assert.ok(said.some((line) => line.includes("401")));
+	});
+
+	/** 404 = 这台 BN 上眼下没有桥在跑;503 = 这条接入停用了。都是拨一下就好,该重连。 */
+	it("404 / 503 照样退避重连", () => {
+		for (const status of [404, 503]) {
+			sockets = [];
+			timers = [];
+			client({ log: { info: () => {}, warn: () => {} } });
+			sockets[0]?.fire("error", { message: `Unexpected server response: ${status}` });
+			sockets[0]?.fire("close", { code: 1006 });
+			assert.equal(timers.length, 1, `${status} 之后该重连`);
+		}
 	});
 
 	it("收摊之后不再重连", () => {

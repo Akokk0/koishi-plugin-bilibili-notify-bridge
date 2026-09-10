@@ -30,6 +30,8 @@ export interface SocketLike {
 export interface BridgeClientOptions {
 	/** 开一条新 socket。**每次重连都会叫**,所以别在外面缓存。 */
 	open(): SocketLike;
+	/** 连的是哪儿 —— 只进日志。连不上时「地址是什么」往往就是答案。 */
+	url: string;
 	/** 握手那一刻的全量 bot 名单 —— 现取,重连时报的是最新那份。 */
 	bots(): BridgeBotWire[];
 	/** 这个插件的版本,报给 BN 排障用。 */
@@ -54,6 +56,33 @@ export interface BridgeClient {
 	dispose(): void;
 }
 
+/**
+ * upgrade 被拒时,`ws` 只把状态码写进 error 事件那句话里(`unexpected-response` 要单独
+ * 监听才有,而 koishi 交回来的是 DOM 那一套)。所以只能从这句话里捞。
+ */
+const REFUSED = /Unexpected server response:\s*(\d{3})/;
+
+/** 从 error 事件里把**人能看懂的那句话**捞出来。吞掉它等于让人对着连不上的 BN 猜。 */
+export function reasonOf(event: unknown): string {
+	const ev = event as { message?: unknown; error?: { message?: unknown } } | undefined;
+	const message = typeof ev?.message === "string" ? ev.message : undefined;
+	const inner = typeof ev?.error?.message === "string" ? ev.error.message : undefined;
+	return message ?? inner ?? "不知道为什么";
+}
+
+/**
+ * upgrade 被这个状态码拒了之后,还要不要重连(协议 §2)。
+ *
+ * **只有 401 是「别再试了」** —— token 不对 / 已吊销,再试一万次也一样,该把错显示给用户。
+ * 404(这台 BN 上眼下没有桥在跑)与 503(这条接入被停用了)都是拨一下开关就好的暂时状态。
+ *
+ * 🔴 这一档**照 close code 判不出来**:upgrade 被拒时 close code 是 1006,和网线松了长得
+ * 一模一样。漏了它的症状是「token 填错 → koishi 永远捶 BN」,而屏幕上什么有用的都没有。
+ */
+export function shouldReconnectAfterHttp(status: number): boolean {
+	return status !== 401;
+}
+
 export function bridgeBackoffMs(attempt: number): number {
 	return Math.min(30_000, 500 * 2 ** Math.max(0, attempt));
 }
@@ -67,6 +96,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	let cancelRetry: (() => void) | undefined;
 	/** 一条 socket 只安排一次重连:`error` 与 `close` 往往接连来。 */
 	let scheduled = false;
+	/** 这一轮的 upgrade 被哪个状态码拒了 —— close 那头据它决定要不要回去。 */
+	let refusedBy: number | undefined;
 
 	function send(frame: BridgeToServerFrame): boolean {
 		if (!socket || !shook) return false;
@@ -130,6 +161,7 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		if (disposed) return;
 		scheduled = false;
 		shook = false;
+		refusedBy = undefined;
 		const next = opts.open();
 		socket = next;
 		next.addEventListener("open", () => {
@@ -156,6 +188,11 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		next.addEventListener("close", (ev: { code?: number }) => {
 			shook = false;
 			const code = ev?.code ?? 1006;
+			// upgrade 被拒那一路先判:那时 close code 是 1006,和网线松了分不出来。
+			if (refusedBy !== undefined && !shouldReconnectAfterHttp(refusedBy)) {
+				opts.log.warn(`BN 回了 ${refusedBy}:token 不对或已吊销,不重连了 —— 去 BN 拓展页对一下`);
+				return;
+			}
 			if (BRIDGE_TERMINAL_CLOSE_CODES.includes(code)) {
 				// 再试一次也是同样的结果 —— 该把错显示给用户,而不是拿同样的 token 去捶 BN。
 				opts.log.warn(`BN 断开了这条连接(${code}):这是配置那头的事,不重连`);
@@ -163,7 +200,13 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			}
 			retry(`断了(${code})`);
 		});
-		next.addEventListener("error", () => opts.log.warn("连接出错"));
+		next.addEventListener("error", (ev: never) => {
+			const reason = reasonOf(ev);
+			const status = REFUSED.exec(reason)?.[1];
+			if (status) refusedBy = Number(status);
+			// 🔴 **把原因说出来**。这一句是主人手里唯一的线索:连不上时它就是全部。
+			opts.log.warn(`连不上 ${opts.url}:${reason}`);
+		});
 	}
 
 	connect();

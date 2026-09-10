@@ -49,6 +49,7 @@ export function apply(ctx: Context, config: Config) {
 	let subscription: BridgeInboundSubscription = { private: false, group: "none" };
 
 	const client = createBridgeClient({
+		url: config.url,
 		// token 走 upgrade 的请求头,不进 URL —— URL 会落进反代的访问日志。
 		open: () =>
 			ctx.http.ws(config.url, { headers: { Authorization: `Bearer ${config.token}` } }),
