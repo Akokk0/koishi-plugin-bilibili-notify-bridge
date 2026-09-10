@@ -39,13 +39,18 @@ describe("@全体:一格一个依据", () => {
 		assert.equal(capabilitiesFor("qq").atAll, "unsupported");
 	});
 
+	/** `koishi-plugin-adapter-onebot` 的编码器:`attrs.type === "all"` → `[CQ:at,qq=all]`。 */
+	it("onebot 真的发得出去", () => {
+		assert.equal(capabilitiesFor("onebot").atAll, "supported");
+	});
+
 	/**
 	 * 没查过适配器的平台一律 `unknown`。**拿不准不许报 supported** —— 三态里这一档
 	 * 就是为它准备的:面板上显示「还不知道」,BN 照样会试。
 	 */
 	it("没查过的平台是「还不知道」,不是「不支持」", () => {
-		assert.equal(capabilitiesFor("onebot").atAll, "unknown");
 		assert.equal(capabilitiesFor("lark").atAll, "unknown");
+		assert.equal(capabilitiesFor("slack").atAll, "unknown");
 	});
 });
 
@@ -67,10 +72,21 @@ describe("其余五项:今天的答案与平台无关", () => {
 		}
 	});
 
-	/** 这三项这一版都没实现,所以答案是「这个桥做不到」而不是「不知道」。 */
-	it("合并转发 / 小程序卡 / 分享卡链接:这一版没做,如实报不支持", () => {
-		const caps = capabilitiesFor("discord");
-		assert.equal(caps.forward, "unsupported");
+	/**
+	 * 🔴 合并转发**按平台分**,而且判据是「那家的 `<figure>` 是不是真的合并转发卡」:
+	 * onebot 的 `<figure>` 走 `send_group_forward_msg`(真·聊天记录卡),而 discord /
+	 * telegram 的 `figure` 只是**换个头像分条发**,不是同一回事。
+	 */
+	it("合并转发只有 onebot 有 —— 别家的 figure 不是那个东西", () => {
+		assert.equal(capabilitiesFor("onebot").forward, "supported");
+		assert.equal(capabilitiesFor("discord").forward, "unsupported");
+		assert.equal(capabilitiesFor("telegram").forward, "unsupported");
+		assert.equal(capabilitiesFor("lark").forward, "unknown");
+	});
+
+	/** 这两项这一版没实现,所以答案是「这个桥做不到」而不是「不知道」。 */
+	it("小程序卡 / 分享卡链接:这一版没做,如实报不支持", () => {
+		const caps = capabilitiesFor("onebot");
 		assert.equal(caps.miniAppCard, "unsupported");
 		assert.equal(caps.shareCardLinks, "unsupported");
 	});

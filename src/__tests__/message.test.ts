@@ -15,6 +15,7 @@ const URL_B = "http://192.168.1.5:8787/ext/bridge/blob/bbbb";
 
 function ctx(over: Partial<Parameters<typeof renderMessage>[1]> = {}) {
 	return {
+		forward: true,
 		images: new Map([
 			[URL_A, { data: PNG, mime: "image/png" }],
 			[URL_B, { data: PNG, mime: "image/png" }],
@@ -89,14 +90,35 @@ describe("复合消息", () => {
 });
 
 describe("降级", () => {
-	/** 这个桥没有合并转发,但**一张都不能少**(协议 §6.3 写死的)。 */
-	it("合并转发做不到 → 多张图照发,一张不少", () => {
+	/** 报了 `forward: supported` 就得真发一张卡 —— onebot 的 `<figure>` 走 send_group_forward_msg。 */
+	it("能合并转发就包成一张 figure", () => {
 		const out = render({
 			kind: "forward-images",
 			images: [{ url: URL_A }, { url: URL_B }],
 			forward: true,
 		});
+		assert.ok(out.startsWith("<figure>"), out.slice(0, 40));
 		assert.equal(out.split("<img").length - 1, 2);
+	});
+
+	/** 做不到就**一张张发**,一张都不能少(协议 §6.3 写死的),不是整条丢。 */
+	it("合并转发做不到 → 多张图照发,一张不少", () => {
+		const out = render(
+			{ kind: "forward-images", images: [{ url: URL_A }, { url: URL_B }], forward: true },
+			{ forward: false },
+		);
+		assert.ok(!out.includes("<figure"));
+		assert.equal(out.split("<img").length - 1, 2);
+	});
+
+	/** BN 说这一条不要合并转发,那就别自作主张包成卡。 */
+	it("BN 说不合并就不合并,哪怕做得到", () => {
+		const out = render({
+			kind: "forward-images",
+			images: [{ url: URL_A }, { url: URL_B }],
+			forward: false,
+		});
+		assert.ok(!out.includes("<figure"));
 	});
 
 	/**

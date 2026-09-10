@@ -16,19 +16,39 @@ import {
 } from "./protocol";
 
 /**
- * @全体:**查过 `@satorijs/adapter-<平台>` 的消息编码器**才写进来。
+ * @全体:**查过那个平台适配器的消息编码器**才写进来。
  *
+ * - `onebot` —— `attrs.type === "all"` → `[CQ:at,qq=all]`(`koishi-plugin-adapter-onebot`)
  * - `discord` —— `attrs.type === "all"` → `@everyone`
  * - `kook` —— `attrs.type === "all"` → `(met)all(met)`
  * - `telegram` / `qq` —— 编码器里**根本没有 at-all 这一支**,元素会被静默丢掉
  *
- * 没列进来的(onebot、lark、slack……)按 `unknown` 走 —— 不是它们做不到,是**我们没查过**。
+ * 没列进来的(lark、slack……)按 `unknown` 走 —— 不是它们做不到,是**我们没查过**。
  * 加一行之前先去翻那个适配器的编码器。
  */
 const AT_ALL: Record<string, BridgeCapabilityState> = {
+	onebot: "supported",
 	discord: "supported",
 	kook: "supported",
 	telegram: "unsupported",
+	qq: "unsupported",
+};
+
+/**
+ * 合并转发(「聊天记录」卡)。
+ *
+ * 🔴 判据是「那家的 `<figure>` **是不是真的合并转发卡**」,不是「有没有 figure 这一支」:
+ *
+ * - `onebot` —— `<figure>` 走 `send_group_forward_msg`,**真·聊天记录卡**
+ * - `discord` / `telegram` —— 有 `figure`,但那是**换个头像分条发**(webhook 那套),
+ *   不是一张卡。报支持的话主人会以为群里收到的是合并转发,实际是刷屏
+ * - `kook` / `qq` —— 编码器里没有这一支
+ */
+const FORWARD: Record<string, BridgeCapabilityState> = {
+	onebot: "supported",
+	discord: "unsupported",
+	telegram: "unsupported",
+	kook: "unsupported",
 	qq: "unsupported",
 };
 
@@ -43,8 +63,8 @@ export function capabilitiesFor(platform: string): BridgeCapabilityReport {
 	// 适配器还会把 markdown 字符**转义掉**。报支持的话群里收到的是一堆反斜杠;报不支持
 	// BN 会在它那侧剥成干净纯文本。
 	report.markdown = "unsupported";
-	// 这三样这一版没实现 —— 答案是「这个桥做不到」,不是「不知道」。
-	report.forward = "unsupported";
+	report.forward = FORWARD[platform] ?? "unknown";
+	// 这两样这一版没实现 —— 答案是「这个桥做不到」,不是「不知道」。
 	report.miniAppCard = "unsupported";
 	report.shareCardLinks = "unsupported";
 	return report;

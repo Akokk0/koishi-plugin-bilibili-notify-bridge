@@ -23,6 +23,8 @@ export interface RenderContext {
 	images: Map<string, RenderedImage>;
 	/** 这个 bot 能不能真 @全体。做不到就降级成文字。 */
 	atAll: boolean;
+	/** 这个 bot 能不能真发合并转发卡。做不到就一张张发。 */
+	forward: boolean;
 }
 
 /** 拿不到就**抛**。发一条缺了图的推送比发不出去更难查。 */
@@ -76,9 +78,14 @@ export function renderMessage(message: BridgeMessage, ctx: RenderContext): h[] {
 		}
 		case "composite":
 			return message.segments.map((seg) => segment(seg, ctx));
-		case "forward-images":
-			// 合并转发这个桥做不到(能力表里报的是 unsupported),协议要求**降级成多张图**。
-			return message.images.map((image) => imageOf(image.url, ctx));
+		case "forward-images": {
+			const images = message.images.map((image) => imageOf(image.url, ctx));
+			// 两个条件都要:BN 说这一条要合并(`message.forward`),而且这个平台真做得到。
+			// onebot 的 `<figure>` 走 `send_group_forward_msg`,是真的聊天记录卡。
+			if (message.forward && ctx.forward) return [h("figure", {}, ...images)];
+			// 做不到就**一张张发**(协议 §6.3),别整条丢 —— 丢了主人不知道少了什么。
+			return images;
+		}
 		case "miniapp-card":
 			// 签不了 ark。降级用的是 `jumpUrl`(网页链接)——`path` 是小程序**页面路径**,
 			// 贴到群里谁都点不开。

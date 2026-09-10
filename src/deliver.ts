@@ -42,9 +42,11 @@ export async function deliverSend(
 	}
 
 	try {
+		const capabilities = capabilitiesFor(frame.platform);
 		const content = renderMessage(frame.message, {
 			images,
-			atAll: capabilitiesFor(frame.platform).atAll === "supported",
+			atAll: capabilities.atAll === "supported",
+			forward: capabilities.forward === "supported",
 		});
 		if (frame.target.scope === "private") {
 			// 平台没有私聊这回事时 koishi 也没有这个方法 —— 回一句人话,别抛 TypeError。
