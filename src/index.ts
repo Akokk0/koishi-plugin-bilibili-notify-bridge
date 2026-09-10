@@ -15,7 +15,8 @@ import { botsOf } from "./bots";
 import { createBridgeClient } from "./client";
 import { deliverSend } from "./deliver";
 import { inboundOf } from "./inbound";
-import type { BridgeInboundSubscription } from "./protocol";
+import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
+import type { BridgeCapabilityReport, BridgeInboundSubscription } from "./protocol";
 import { VERSION } from "./version";
 
 export const name = "bilibili-notify-bridge";
@@ -47,6 +48,50 @@ export function apply(ctx: Context, config: Config) {
 	 * 群消息传出去,等于在用户还没同意时就上传了他的聊天。
 	 */
 	let subscription: BridgeInboundSubscription = { private: false, group: "none" };
+	/**
+	 * 探出来的能力,按 bot 记。今天只有一格:能不能签小程序卡 —— 六项里**唯一探得出来的**
+	 * (它是个 API 调用,失败带 retcode;@全体那些是消息元素,适配器静默丢弃,探不出)。
+	 */
+	const probed = new Map<string, Partial<BridgeCapabilityReport>>();
+
+	/** onebot 的 `internal` 能调任意 action,失败抛 `SenderError` 并带 retcode。 */
+	function onebotInternalOf(bot: {
+		platform?: string;
+		internal?: { _get?: (action: string, params?: unknown) => Promise<unknown> };
+	}): ((action: string, params?: unknown) => Promise<unknown>) | undefined {
+		if (bot.platform !== "onebot") return undefined;
+		const get = bot.internal?._get;
+		return get ? (action, params) => get.call(bot.internal, action, params) : undefined;
+	}
+
+	/** 记一格探测结果;真变了才重推名单 —— 名单是全量快照,推空的只是白费带宽。 */
+	function remember(botId: string, patch: Partial<BridgeCapabilityReport>): void {
+		const before = probed.get(botId) ?? {};
+		if (before.miniAppCard === patch.miniAppCard) return;
+		probed.set(botId, { ...before, ...patch });
+		pushBots();
+	}
+
+	/**
+	 * 空参探一次签卡口。`1404`/`404` = 这个实现没有它;`1400`(参数错)或直接成功 = 它在;
+	 * 别的错(超时、限流)什么都证明不了 —— 保持「还不知道」,下次上线再探。
+	 */
+	async function probeMiniApp(bot: { platform?: string; selfId?: string }): Promise<void> {
+		const call = onebotInternalOf(bot);
+		if (!call || !bot.selfId) return;
+		const botId = `${bot.platform}:${bot.selfId}`;
+		let state: BridgeCapabilityReport["miniAppCard"];
+		try {
+			await call("get_mini_app_ark", {});
+			state = "supported";
+		} catch (err) {
+			state = readMiniAppProbe({ retcode: (err as { code?: number }).code });
+		}
+		if (state !== "unknown") remember(botId, { miniAppCard: state });
+	}
+
+	/** bot 名单是**全量快照**:变了就整份重推。 */
+	const pushBots = () => client.pushBots(botsOf([...ctx.bots], (botId) => probed.get(botId)));
 
 	const client = createBridgeClient({
 		url: config.url,
@@ -54,7 +99,7 @@ export function apply(ctx: Context, config: Config) {
 		open: () =>
 			ctx.http.ws(config.url, { headers: { Authorization: `Bearer ${config.token}` } }),
 		// 现取:重连时报的是**那一刻**的名单,不是插件启动时的。
-		bots: () => botsOf([...ctx.bots]),
+		bots: () => botsOf([...ctx.bots], (botId) => probed.get(botId)),
 		version: VERSION,
 		onWelcome: (next) => {
 			subscription = next;
@@ -63,6 +108,26 @@ export function apply(ctx: Context, config: Config) {
 		deliver: (frame) =>
 			deliverSend(frame, {
 				botOf: (botId) => ctx.bots.find((bot) => `${bot.platform}:${bot.selfId}` === botId),
+				/**
+				 * 向腾讯签一张小程序卡。签不下来回 `null`,上层会退成文字 —— **别抛**:
+				 * 抛了整条推送就成了失败,而其实退成文字是发得出去的。
+				 */
+				async signMiniApp(botId, card) {
+					const bot = ctx.bots.find((b) => `${b.platform}:${b.selfId}` === botId);
+					const call = bot ? onebotInternalOf(bot) : undefined;
+					if (!call) return null;
+					try {
+						const data = arkToSegmentData(await call("get_mini_app_ark", arkRequestOf(card)));
+						if (data !== null) remember(botId, { miniAppCard: "supported" });
+						return data;
+					} catch (err) {
+						// 真发时收到 1404 也是一种证据 —— 把这个 bot 记成签不了,名单跟着更新。
+						const state = readMiniAppProbe({ retcode: (err as { code?: number }).code });
+						if (state === "unsupported") remember(botId, { miniAppCard: "unsupported" });
+						log.warn(`签小程序卡失败:${(err as Error).message}`);
+						return null;
+					}
+				},
 				async fetchImage(url) {
 					// 🔴 图必须**桥自己下载**(协议 §9):那条 URL 只保证桥自己可达,BN 常跑在
 					// NAS 上,交给平台去拉是静默失败。
@@ -75,11 +140,15 @@ export function apply(ctx: Context, config: Config) {
 	});
 	ctx.on("dispose", () => client.dispose());
 
-	// bot 名单是**全量快照**:koishi 这三个事件任一发生就整份重推。
-	const pushBots = () => client.pushBots(botsOf([...ctx.bots]));
-	ctx.on("login-added", pushBots);
-	ctx.on("login-removed", pushBots);
-	ctx.on("login-updated", pushBots);
+	ctx.on("login-added", (login) => {
+		pushBots();
+		// 上线就探一次:探之前那一格是「还不知道」,探完了名单会再推一次带上真答案。
+		void probeMiniApp(login.bot ?? {});
+	});
+	ctx.on("login-removed", () => pushBots());
+	ctx.on("login-updated", () => pushBots());
+	// 插件后装、bot 已经在线的那一路 —— 事件不会补发。
+	for (const bot of ctx.bots) void probeMiniApp(bot);
 
 	ctx.on("message", (session) => {
 		// 过滤在这一侧做(协议 §8),省的是带宽与隐私;群白名单那种策略仍归 BN 判。
@@ -90,6 +159,8 @@ export function apply(ctx: Context, config: Config) {
 				channelId: session.channelId,
 				isDirect: session.isDirect,
 				content: session.content ?? "",
+				// 分享卡(`json` / `xml` 段)只在元素里看得见,正文里没有。
+				elements: session.elements ?? [],
 			},
 			subscription,
 		);

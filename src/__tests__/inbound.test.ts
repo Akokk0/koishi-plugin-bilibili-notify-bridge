@@ -79,3 +79,33 @@ describe("正文", () => {
 		assert.equal(inboundOf(session({ content: '<img src="http://x/y.png"/>' }), ALL), null);
 	});
 });
+
+describe("分享卡", () => {
+	const card = (url: string) => ({
+		type: "json",
+		attrs: {
+			data: JSON.stringify({ app: "com.tencent.structmsg", meta: { news: { jumpUrl: url } } }),
+		},
+	});
+
+	/**
+	 * 协议 §5.3 要求桥把分享卡里的链接**拼进正文**再发上来 —— 帧里没有单独放它的地方。
+	 * 群里有人转一张 B 站分享卡时,正文常常是空的,不拼就等于这条消息不存在。
+	 */
+	it("卡里的链接拼进正文,哪怕正文本来是空的", () => {
+		const out = inboundOf(
+			session({ content: "", elements: [card("https://b23.tv/aaa")] }),
+			ALL,
+		);
+		assert.ok(out?.text.includes("https://b23.tv/aaa"), out?.text);
+	});
+
+	it("正文里本来有话就跟在后面", () => {
+		const out = inboundOf(
+			session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }),
+			ALL,
+		);
+		assert.ok(out?.text.startsWith("看这个"));
+		assert.ok(out?.text.includes("https://b23.tv/bbb"));
+	});
+});

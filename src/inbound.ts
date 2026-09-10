@@ -6,6 +6,7 @@
  */
 
 import h from "@satorijs/element";
+import { type CardElementLike, shareCardLinksOf } from "./onebot";
 import type { BridgeInboundMessage, BridgeInboundSubscription } from "./protocol";
 
 /** 只依赖这几格 —— 写全 koishi 的 `Session` 等于把整个框架焊进这一层。 */
@@ -17,6 +18,8 @@ export interface SessionLike {
 	isDirect: boolean;
 	/** koishi 的原始正文,**带元素标记**。 */
 	content: string;
+	/** 归一化之后的元素。分享卡(`json` / `xml` 段)只在这里看得见。 */
+	elements?: readonly CardElementLike[];
 }
 
 /** 判「这条里有没有链接」。够宽即可 —— 真正解析什么是 BN 的活。 */
@@ -43,7 +46,10 @@ export function inboundOf(
 	// 🔴 bot 自己发的一律不驮。漏了它,BN 会解析自己刚发出去的那条链接再回一张卡 —— 无限回卡。
 	if (session.userId === session.selfId) return null;
 
-	const text = plainTextOf(session.content);
+	// 分享卡里的链接**拼进正文**(协议 §5.3:帧里没有单独放它的地方)。群里转一张 B 站
+	// 分享卡时正文常常是空的,不拼就等于这条消息不存在。
+	const links = shareCardLinksOf(session.elements ?? []);
+	const text = [plainTextOf(session.content), ...links].filter((part) => part !== "").join(" ");
 	if (text === "") return null;
 
 	if (session.isDirect) {

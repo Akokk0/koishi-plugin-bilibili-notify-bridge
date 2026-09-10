@@ -52,6 +52,17 @@ describe("名单", () => {
 		assert.equal(list.length, 2);
 	});
 
+	/** 探出来的那格盖在表上,而且**按 bot 分** —— 同一台 koishi 上两个 QQ 号可能一个能签一个不能。 */
+	it("探出来的能力盖到那个 bot 头上,别的 bot 不受影响", () => {
+		const list = botsOf(
+			[bot({ platform: "onebot", selfId: "1" }), bot({ platform: "onebot", selfId: "2" })],
+			(botId) => (botId === "onebot:1" ? { miniAppCard: "supported" } : undefined),
+		);
+		assert.equal(list[0]?.capabilities?.miniAppCard, "supported");
+		// 没探到的那个照旧是「还不知道」,不是「不支持」。
+		assert.equal(list[1]?.capabilities?.miniAppCard, "unknown");
+	});
+
 	/**
 	 * 🔴 koishi 里 `platform` / `selfId` **是可选的**(bot 刚建、还没登上时两格都空)。
 	 * 报一个 `undefined:undefined` 上去,BN 那头会多出一个永远发不出去的 bot,而主人

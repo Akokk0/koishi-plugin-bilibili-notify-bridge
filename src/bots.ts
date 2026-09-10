@@ -7,7 +7,7 @@
  */
 
 import { capabilitiesFor } from "./capabilities";
-import type { BridgeBotWire } from "./protocol";
+import type { BridgeBotWire, BridgeCapabilityReport } from "./protocol";
 
 /**
  * 只依赖这几格 —— 写全 koishi 的 `Bot` 等于把整个框架的形状焊进 wire 层。
@@ -21,7 +21,16 @@ export interface KoishiBotLike {
 	user?: { name?: string };
 }
 
-export function botsOf(bots: readonly KoishiBotLike[]): BridgeBotWire[] {
+/**
+ * 探出来的能力,按 bot 查。**按 bot 而不是按平台** —— 同一台 koishi 上两个 QQ 号,
+ * 一个接的实现签得了小程序卡、另一个签不了,这是真会发生的。
+ */
+export type ProbedCapabilities = (botId: string) => Partial<BridgeCapabilityReport> | undefined;
+
+export function botsOf(
+	bots: readonly KoishiBotLike[],
+	probed?: ProbedCapabilities,
+): BridgeBotWire[] {
 	return bots.flatMap((bot) => {
 		if (!bot.platform || !bot.selfId) return [];
 		const wire: BridgeBotWire = {
@@ -29,7 +38,7 @@ export function botsOf(bots: readonly KoishiBotLike[]): BridgeBotWire[] {
 			botId: `${bot.platform}:${bot.selfId}`,
 			platform: bot.platform,
 			selfId: bot.selfId,
-			capabilities: capabilitiesFor(bot.platform),
+			capabilities: capabilitiesFor(bot.platform, probed?.(`${bot.platform}:${bot.selfId}`)),
 		};
 		// 没有就不报这一格 —— 编一个「未命名」出来,面板上就再也分不出「没名字」和
 		// 「真的叫未命名」。

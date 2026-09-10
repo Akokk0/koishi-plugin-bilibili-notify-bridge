@@ -81,6 +81,42 @@ describe("发出去了", () => {
 	});
 });
 
+describe("小程序卡", () => {
+	const card = {
+		kind: "miniapp-card",
+		title: "标题",
+		desc: "简介",
+		picUrl: "http://x/pic.png",
+		path: "pages/video/video?bvid=BV1",
+		jumpUrl: "https://www.bilibili.com/video/BV1",
+	} as const;
+
+	it("签得下来就发一张真卡(json 段)", async () => {
+		const d = deps({ signMiniApp: async () => '{"app":"com.tencent.miniapp_01"}' });
+		const out = await deliverSend(frame({ message: card }), d.deps);
+		assert.deepEqual(out, { ok: true });
+		assert.ok(d.sent[0]?.content.includes("onebot:json"), d.sent[0]?.content);
+	});
+
+	/** 签不下来(这个实现没这个接口 / 腾讯拒了)就**降级成文字**,不是整条丢。 */
+	it("签不下来 → 退成标题 + 简介 + 网页链接,而且不是小程序路径", async () => {
+		const d = deps({ signMiniApp: async () => null });
+		const out = await deliverSend(frame({ message: card }), d.deps);
+		assert.deepEqual(out, { ok: true });
+		const content = d.sent[0]?.content ?? "";
+		assert.ok(content.includes("https://www.bilibili.com/video/BV1"));
+		assert.ok(!content.includes("pages/video/video"), "把小程序页面路径贴出去了,点不开");
+	});
+
+	/** 压根没接签卡口(别的平台)也一样降级,不该炸。 */
+	it("没有签卡这回事的平台照样降级", async () => {
+		const d = deps();
+		const out = await deliverSend(frame({ message: card }), d.deps);
+		assert.deepEqual(out, { ok: true });
+		assert.ok(d.sent[0]?.content.includes("标题"));
+	});
+});
+
 describe("发不出去", () => {
 	it("名单里没有这个 bot → 说清楚是哪个", async () => {
 		const out = await deliverSend(frame(), deps({ botOf: () => undefined }).deps);

@@ -84,10 +84,29 @@ describe("其余五项:今天的答案与平台无关", () => {
 		assert.equal(capabilitiesFor("lark").forward, "unknown");
 	});
 
-	/** 这两项这一版没实现,所以答案是「这个桥做不到」而不是「不知道」。 */
-	it("小程序卡 / 分享卡链接:这一版没做,如实报不支持", () => {
-		const caps = capabilitiesFor("onebot");
-		assert.equal(caps.miniAppCard, "unsupported");
-		assert.equal(caps.shareCardLinks, "unsupported");
+	/** 分享卡链接只要**桥自己解得动**就成立,与实现无关 —— 只有 onebot 有 json/xml 卡。 */
+	it("分享卡链接:onebot 解得动,别家没有这回事", () => {
+		assert.equal(capabilitiesFor("onebot").shareCardLinks, "supported");
+		assert.equal(capabilitiesFor("discord").shareCardLinks, "unsupported");
+	});
+
+	/**
+	 * 🔴 小程序卡**探得出来**(`get_mini_app_ark` 是个 API,失败带 retcode),所以它不写死:
+	 * 探之前一律「还不知道」,探完了由调用方盖上真答案。
+	 */
+	it("小程序卡:没探之前是「还不知道」,探完了可以盖上去", () => {
+		assert.equal(capabilitiesFor("onebot").miniAppCard, "unknown");
+		assert.equal(
+			capabilitiesFor("onebot", { miniAppCard: "supported" }).miniAppCard,
+			"supported",
+		);
+		// 盖的只是那一格,别的照旧。
+		assert.equal(capabilitiesFor("onebot", { miniAppCard: "supported" }).atAll, "supported");
+	});
+
+	/** 别的平台压根没有小程序卡这回事 —— 探都不用探。 */
+	it("非 QQ 家的平台:小程序卡恒不支持", () => {
+		assert.equal(capabilitiesFor("discord").miniAppCard, "unsupported");
+		assert.equal(capabilitiesFor("telegram").miniAppCard, "unsupported");
 	});
 });

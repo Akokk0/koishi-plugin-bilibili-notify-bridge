@@ -6,6 +6,7 @@
  * 所以这个函数**永远不抛**,只回 `{ ok, err }`。
  */
 
+import h from "@satorijs/element";
 import { capabilitiesFor } from "./capabilities";
 import { imageUrlsIn, renderMessage, type RenderedImage } from "./message";
 import type { BridgeSendFrame } from "./protocol";
@@ -20,6 +21,11 @@ export interface DeliverDeps {
 	botOf(botId: string): SendableBot | undefined;
 	/** 把 BN 那条一次性 URL 取回来。取不到就抛,这一层接住。 */
 	fetchImage(url: string): Promise<RenderedImage>;
+	/**
+	 * 向腾讯签一张小程序卡,回能塞进 `json` 段的那一串;**签不了回 `null`**(这个实现没有
+	 * 那个接口、或者腾讯拒了)。没接这个口的平台压根不给。
+	 */
+	signMiniApp?(botId: string, card: Extract<BridgeSendFrame["message"], { kind: "miniapp-card" }>): Promise<string | null>;
 }
 
 export async function deliverSend(
@@ -42,22 +48,34 @@ export async function deliverSend(
 	}
 
 	try {
+		// 小程序卡要先向腾讯签一张 ark,签得下来才发真卡;签不下来落到下面的降级(文字)。
+		if (frame.message.kind === "miniapp-card" && deps.signMiniApp) {
+			const data = await deps.signMiniApp(frame.botId, frame.message);
+			if (data !== null) {
+				await sendTo(bot, frame, [h("onebot:json", { data })]);
+				return { ok: true };
+			}
+		}
 		const capabilities = capabilitiesFor(frame.platform);
 		const content = renderMessage(frame.message, {
 			images,
 			atAll: capabilities.atAll === "supported",
 			forward: capabilities.forward === "supported",
 		});
-		if (frame.target.scope === "private") {
-			// 平台没有私聊这回事时 koishi 也没有这个方法 —— 回一句人话,别抛 TypeError。
-			if (!bot.sendPrivateMessage) return { ok: false, err: `${frame.platform} 发不了私聊` };
-			await bot.sendPrivateMessage(frame.target.address, content);
-		} else {
-			// `parentAddress` 是论坛话题 / 子频道的上级,koishi 拿它定位;没有就不传。
-			await bot.sendMessage(frame.target.address, content, frame.target.parentAddress);
-		}
+		await sendTo(bot, frame, content);
 		return { ok: true };
 	} catch (err) {
 		return { ok: false, err: (err as Error).message };
 	}
+}
+
+/** 私聊走私聊那条口,别的走频道那条。`parentAddress` 是论坛话题 / 子频道的上级。 */
+async function sendTo(bot: SendableBot, frame: BridgeSendFrame, content: unknown): Promise<void> {
+	if (frame.target.scope === "private") {
+		// 平台没有私聊这回事时 koishi 也没有这个方法 —— 回一句人话,别抛 TypeError。
+		if (!bot.sendPrivateMessage) throw new Error(`${frame.platform} 发不了私聊`);
+		await bot.sendPrivateMessage(frame.target.address, content);
+		return;
+	}
+	await bot.sendMessage(frame.target.address, content, frame.target.parentAddress);
 }

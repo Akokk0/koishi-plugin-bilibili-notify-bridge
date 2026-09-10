@@ -52,7 +52,30 @@ const FORWARD: Record<string, BridgeCapabilityState> = {
 	qq: "unsupported",
 };
 
-export function capabilitiesFor(platform: string): BridgeCapabilityReport {
+/**
+ * 分享卡里的链接:桥自己解得动就成立 —— 只有 QQ 家有 json / xml 卡这回事。
+ * 与 {@link MINI_APP} 不同,这一格**不用探**:解卡是我们自己做的事,不问对面。
+ */
+const SHARE_CARD_LINKS: Record<string, BridgeCapabilityState> = {
+	onebot: "supported",
+};
+
+/**
+ * 小程序卡:**只有 QQ 家有**(要向腾讯签 ark),别家压根没有这回事。
+ *
+ * 🔴 onebot 这一格写成 `unknown` 是刻意的 —— 它是六项里**唯一探得出来的**
+ * (`get_mini_app_ark` 是个 API 调用,失败带 retcode;而 @全体那些是消息元素,适配器
+ * 碰到不认识的静默丢弃,连 try/catch 都探不出)。探之前如实说不知道,探完了由调用方盖上。
+ */
+const MINI_APP: Record<string, BridgeCapabilityState> = {
+	onebot: "unknown",
+};
+
+export function capabilitiesFor(
+	platform: string,
+	/** 探出来的结果,盖在表上面。只盖给出来的那几格。 */
+	probed: Partial<BridgeCapabilityReport> = {},
+): BridgeCapabilityReport {
 	const report = {} as BridgeCapabilityReport;
 	for (const capability of BRIDGE_CAPABILITIES) report[capability] = "unknown";
 
@@ -64,8 +87,7 @@ export function capabilitiesFor(platform: string): BridgeCapabilityReport {
 	// BN 会在它那侧剥成干净纯文本。
 	report.markdown = "unsupported";
 	report.forward = FORWARD[platform] ?? "unknown";
-	// 这两样这一版没实现 —— 答案是「这个桥做不到」,不是「不知道」。
-	report.miniAppCard = "unsupported";
-	report.shareCardLinks = "unsupported";
-	return report;
+	report.shareCardLinks = SHARE_CARD_LINKS[platform] ?? "unsupported";
+	report.miniAppCard = MINI_APP[platform] ?? "unsupported";
+	return { ...report, ...probed };
 }
