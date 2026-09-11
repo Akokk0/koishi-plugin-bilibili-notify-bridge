@@ -46,18 +46,20 @@ export function inboundOf(
 	// 🔴 bot 自己发的一律不驮。漏了它,BN 会解析自己刚发出去的那条链接再回一张卡 —— 无限回卡。
 	if (session.userId === session.selfId) return null;
 
+	// 订阅闸**排在剥正文之前**。BN 眼下不收这一档的话,下面那两步(解一遍元素树、把分享卡的
+	// json/xml 拆开)全是白干的 —— 而群消息是这条桥最大的一股流量,`group: "none"` 时每一条
+	// 都要白解一遍。两条路在这儿答的都是「不驮」,所以早退一步不改任何结果。
+	// BN 今天群里没有指令入口,群消息唯一的用途就是链接解析 —— 所以「要含链接的」这一档
+	// 之外没有别的档。
+	if (session.isDirect ? !subscription.private : subscription.group !== "with-links") return null;
+
 	// 分享卡里的链接**拼进正文**(协议 §5.3:帧里没有单独放它的地方)。群里转一张 B 站
 	// 分享卡时正文常常是空的,不拼就等于这条消息不存在。
 	const links = shareCardLinksOf(session.elements ?? []);
 	const text = [plainTextOf(session.content), ...links].filter((part) => part !== "").join(" ");
 	if (text === "") return null;
 
-	if (session.isDirect) {
-		return subscription.private ? { scope: "private", userId: session.userId, text } : null;
-	}
-	// BN 今天群里没有指令入口,群消息唯一的用途就是链接解析 —— 所以「要含链接的」这一档
-	// 之外没有别的档。
-	if (subscription.group !== "with-links") return null;
+	if (session.isDirect) return { scope: "private", userId: session.userId, text };
 	if (!HAS_LINK.test(text)) return null;
 	return { scope: "group", groupId: session.channelId, userId: session.userId, text };
 }

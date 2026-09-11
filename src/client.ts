@@ -173,13 +173,12 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			// 抛了也得回执 —— 见文件头那条。
 			outcome = { ok: false, err: (err as Error).message };
 		}
-		if (!socket || !shook) return;
-		socket.send(
-			JSON.stringify(
-				outcome.ok
-					? { type: "result", id: frame.id, ok: true }
-					: { type: "result", id: frame.id, ok: false, err: outcome.err ?? "发不出去" },
-			),
+		// 走 `send()` 那道「连着且握过手才发」的闸 —— 投递要花时间(下图、签卡),回到这儿
+		// 时连接可能早没了。自己手写一遍那道判断,它迟早和 `send()` 说的不是一回事。
+		send(
+			outcome.ok
+				? { type: "result", id: frame.id, ok: true }
+				: { type: "result", id: frame.id, ok: false, err: outcome.err ?? "发不出去" },
 		);
 	}
 
