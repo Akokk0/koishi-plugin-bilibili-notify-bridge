@@ -9,11 +9,7 @@
  * 「还不知道」—— BN 照样会试。
  */
 
-import {
-	BRIDGE_CAPABILITIES,
-	type BridgeCapabilityReport,
-	type BridgeCapabilityState,
-} from "./protocol";
+import type { BridgeCapabilityReport, BridgeCapabilityState } from "./protocol";
 
 /**
  * @全体:**查过那个平台适配器的消息编码器**才写进来。
@@ -76,18 +72,21 @@ export function capabilitiesFor(
 	/** 探出来的结果,盖在表上面。只盖给出来的那几格。 */
 	probed: Partial<BridgeCapabilityReport> = {},
 ): BridgeCapabilityReport {
-	const report = {} as BridgeCapabilityReport;
-	for (const capability of BRIDGE_CAPABILITIES) report[capability] = "unknown";
-
-	report.atAll = AT_ALL[platform] ?? "unknown";
-	// 入站恒真:这个桥自己就在把消息转回去,与平台无关。
-	report.inbound = "supported";
-	// 🔴 markdown 恒假:这个桥不做 markdown → koishi 元素的转换,而 satori 的 discord
-	// 适配器还会把 markdown 字符**转义掉**。报支持的话群里收到的是一堆反斜杠;报不支持
-	// BN 会在它那侧剥成干净纯文本。
-	report.markdown = "unsupported";
-	report.forward = FORWARD[platform] ?? "unknown";
-	report.shareCardLinks = SHARE_CARD_LINKS[platform] ?? "unsupported";
-	report.miniAppCard = MINI_APP[platform] ?? "unsupported";
+	// 🔴 **六格全写在这儿**,别退回「先整张填 unknown、再逐格盖」那种写法:那个循环填的值
+	// 一格都活不下来(下面每格都盖了),真正的代价是它**顶掉了编译器**—— 加第七项能力时
+	// 漏掉的那一格会静默变成「还不知道」,而 BN 那头「还不知道」的意思是「试试看」。
+	// 写成字面量(不带 `as`),漏一格当场红。
+	const report: BridgeCapabilityReport = {
+		atAll: AT_ALL[platform] ?? "unknown",
+		// 入站恒真:这个桥自己就在把消息转回去,与平台无关。
+		inbound: "supported",
+		// 🔴 markdown 恒假:这个桥不做 markdown → koishi 元素的转换,而 satori 的 discord
+		// 适配器还会把 markdown 字符**转义掉**。报支持的话群里收到的是一堆反斜杠;报不支持
+		// BN 会在它那侧剥成干净纯文本。
+		markdown: "unsupported",
+		forward: FORWARD[platform] ?? "unknown",
+		shareCardLinks: SHARE_CARD_LINKS[platform] ?? "unsupported",
+		miniAppCard: MINI_APP[platform] ?? "unsupported",
+	};
 	return { ...report, ...probed };
 }
