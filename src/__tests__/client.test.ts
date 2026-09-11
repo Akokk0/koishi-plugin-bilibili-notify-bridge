@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { createBridgeClient, type SocketLike } from "../client";
+import { BRIDGE_SILENCE_LIMIT_MS, createBridgeClient, type SocketLike } from "../client";
 
 class FakeSocket implements SocketLike {
 	sent: Record<string, unknown>[] = [];
@@ -61,9 +61,15 @@ function client(over: Partial<Parameters<typeof createBridgeClient>[0]> = {}) {
 		onWelcome: () => {},
 		log: SILENT,
 		backoff: () => 10,
+		// 撤销要**真的**把它摘掉 —— `timers` 是「眼下还排着什么」的账本,撤了还留着的话
+		// 「断了之后该不该重连」那几条就只能数到一堆早就作废的定时器。
 		later: (fn, ms) => {
-			timers.push({ fn, ms });
-			return () => {};
+			const entry = { fn, ms };
+			timers.push(entry);
+			return () => {
+				const at = timers.indexOf(entry);
+				if (at >= 0) timers.splice(at, 1);
+			};
 		},
 		...over,
 	});
@@ -74,6 +80,11 @@ function fireTimer(): void {
 	const timer = timers.pop();
 	assert.ok(timer, "没安排重连");
 	timer.fn();
+}
+
+/** 眼下排着的那只看门狗(没有就是 undefined)。 */
+function watchdog(): { fn: () => void; ms: number } | undefined {
+	return timers.find((timer) => timer.ms === BRIDGE_SILENCE_LIMIT_MS);
 }
 
 function connect(over = {}) {
@@ -263,6 +274,62 @@ describe("断了之后", () => {
 			sockets[0]?.fire("close", { code: 1006 });
 			assert.equal(timers.length, 1, `${status} 之后该重连`);
 		}
+	});
+
+	/**
+	 * 🔴 **「连着」不等于「通着」**。NAT / 家宽 / 休眠的路由器会把一条闲着的 TCP 静默掐断:
+	 * 两头都不会收到 FIN,`close` 事件永远不来。BN 每 30 秒催一声,可我们从来不检查
+	 * 「多久没听见它说话了」的话,`connected()` 就恒为 true —— 插件以为自己在岗,BN 那头
+	 * 90 秒后把会话清了,推送全部失败,而 koishi 的日志里一个字都没有。
+	 */
+	it("BN 三个心跳没说过话 → 主动断掉,走既有的退避重连", () => {
+		const c = connect();
+		const dog = watchdog();
+		assert.ok(dog, "没给这条连接排看门狗");
+
+		dog.fn();
+		assert.equal(c.connected(), false, "还以为自己连着");
+		assert.ok(sockets[0]?.closed, "那条死 socket 没被关掉");
+		fireTimer();
+		assert.equal(sockets.length, 2, "没回去重连");
+		sockets[1]?.fire("open");
+		assert.equal(sockets[1]?.sent[0]?.type, "hello");
+	});
+
+	/** 判据是「最近听见过任何帧」,不是「回过 pong」—— 名单、回执、入站一样算活着。 */
+	it("BN 说了话就重新计时,而且只排一只狗", () => {
+		connect();
+		const before = watchdog();
+		sockets[0]?.say({ type: "ping" });
+		const after = watchdog();
+		assert.ok(after);
+		assert.notEqual(before, after, "收到帧之后没有重新计时");
+		assert.equal(
+			timers.filter((timer) => timer.ms === BRIDGE_SILENCE_LIMIT_MS).length,
+			1,
+			"排了不止一只狗",
+		);
+	});
+
+	/** 「失败的原因不许吞」:这一断和网线松了长得一样,不说清楚没人查得出来。 */
+	it("被看门狗踢掉时说清楚是为什么", () => {
+		const said: string[] = [];
+		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		sockets[0]?.fire("open");
+		sockets[0]?.say(WELCOME);
+		watchdog()?.fn();
+		assert.ok(
+			said.some((line) => line.includes("90000") || line.includes("没说过话")),
+			`只说了:${said.join(" | ")}`,
+		);
+	});
+
+	/** 看门狗自己排的定时器也得收摊,不然 koishi 卸载插件之后它还会醒一次。 */
+	it("收摊之后看门狗也撤了", () => {
+		const c = connect();
+		assert.ok(watchdog(), "本来就没排");
+		c.dispose();
+		assert.equal(watchdog(), undefined, "收摊之后还留着一只");
 	});
 
 	it("收摊之后不再重连", () => {

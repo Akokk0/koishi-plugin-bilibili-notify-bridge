@@ -87,6 +87,18 @@ export function bridgeBackoffMs(attempt: number): number {
 	return Math.min(30_000, 500 * 2 ** Math.max(0, attempt));
 }
 
+/**
+ * 多久没听见 BN 说一个字,就当这条连接已经死了。
+ *
+ * 🔴 **「连着」不等于「通着」**:NAT、家宽、睡着的路由器会把一条闲着的 TCP 静默掐断 ——
+ * 两头都不发 FIN,`close` 事件永远不来。不自己看表的话 `connected()` 恒为 true:插件以为
+ * 自己在岗,而 BN 那头 90 秒后早把会话清了 —— 推送全部失败,koishi 的日志里一个字都没有。
+ *
+ * 判据是**「最近听见过任何帧」**而不是「回过 pong」:BN 每 30 秒催一声,名单、回执、入站
+ * 一样算它说过话。给三个心跳的宽限 —— 偶尔慢一发不该把一条好连接踢掉。
+ */
+export const BRIDGE_SILENCE_LIMIT_MS = 90_000;
+
 export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	const backoff = opts.backoff ?? bridgeBackoffMs;
 	let socket: SocketLike | undefined;
@@ -98,6 +110,45 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	let scheduled = false;
 	/** 这一轮的 upgrade 被哪个状态码拒了 —— close 那头据它决定要不要回去。 */
 	let refusedBy: number | undefined;
+	/** 眼下排着的那只看门狗。收到任何帧就撤了重排 —— 一次只该有一只。 */
+	let cancelWatchdog: (() => void) | undefined;
+
+	/**
+	 * 重新计时。**收到任何帧都叫一次** —— 判据是「听见过」,不是「回过 pong」。
+	 * 排的是一发定时器而不是轮询:省一次 `Date.now()` 比较,也省掉「多久查一次」那个参数。
+	 */
+	function armWatchdog(): void {
+		cancelWatchdog?.();
+		cancelWatchdog = opts.later(onSilence, BRIDGE_SILENCE_LIMIT_MS);
+	}
+
+	function clearWatchdog(): void {
+		cancelWatchdog?.();
+		cancelWatchdog = undefined;
+	}
+
+	/**
+	 * 到点了还没听见 BN 说话 —— 当它断了。
+	 *
+	 * **先把 `socket` 摘掉再关**:`close()` 在一条已经死掉的 TCP 上要等到 `ws` 自己的关闭
+	 * 超时(默认 30 秒)才会真的触发 `close` 事件,而那时我们早就连回去了。摘掉之后那条
+	 * 迟到的事件认不出自己是「当前这条」,于是不会再安排第二次重连。
+	 */
+	function onSilence(): void {
+		cancelWatchdog = undefined;
+		if (disposed || !socket) return;
+		const dead = socket;
+		socket = undefined;
+		shook = false;
+		// 说清楚是哪一种断:这一下和网线松了长得一模一样,不说没人查得出来。
+		opts.log.warn(`BN ${BRIDGE_SILENCE_LIMIT_MS}ms 没说过话(心跳也没了),当它断了`);
+		try {
+			dead.close(1000, "no frames from bilibili-notify");
+		} catch {
+			// 已经没了
+		}
+		retry("静默超时");
+	}
 
 	function send(frame: BridgeToServerFrame): boolean {
 		if (!socket || !shook) return false;
@@ -145,7 +196,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 				break;
 			}
 			case "ping":
-				// 带 id 的是面板在探活(量往返),原样回;心跳的不带。
+				// id 原样抄回去。1.3 起 BN 每一发 ping 都带它(心跳那些也带)—— 不抄的话
+				// 面板那颗「测试」配不上这一趟,只会如实超时。
 				socket?.send(
 					JSON.stringify(typeof frame.id === "string" ? { type: "pong", id: frame.id } : { type: "pong" }),
 				);
@@ -167,7 +219,15 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		refusedBy = undefined;
 		const next = opts.open();
 		socket = next;
+		// 连上之后 BN 迟迟不说话也算死 —— 「开着但一直没 welcome」与「半路被掐断」是同一种坏。
+		armWatchdog();
+		/**
+		 * 这个事件是**当前这条** socket 发的吗。被看门狗摘掉的那条晚到的 close / error 会
+		 * 拿着同一个回调回来,不认一下身份的话它能替刚建好的连接再安排一次重连。
+		 */
+		const mine = (): boolean => socket === next;
 		next.addEventListener("open", () => {
+			if (!mine()) return;
 			// hello 是第一帧,而它自己不经过 `send()`(那道闸要求已握手)。
 			next.send(
 				JSON.stringify({
@@ -179,6 +239,9 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			);
 		});
 		next.addEventListener("message", (ev: { data?: unknown }) => {
+			if (!mine()) return;
+			// 听见了就重新计时 —— 认不认得这一帧不重要,它说话了就算活着。
+			armWatchdog();
 			let frame: Record<string, unknown>;
 			try {
 				frame = JSON.parse(String(ev?.data ?? "")) as Record<string, unknown>;
@@ -189,6 +252,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			onFrame(frame);
 		});
 		next.addEventListener("close", (ev: { code?: number }) => {
+			if (!mine()) return;
+			clearWatchdog();
 			shook = false;
 			const code = ev?.code ?? 1006;
 			// upgrade 被拒那一路先判:那时 close code 是 1006,和网线松了分不出来。
@@ -204,6 +269,7 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			retry(`断了(${code})`);
 		});
 		next.addEventListener("error", (ev: never) => {
+			if (!mine()) return;
 			const reason = reasonOf(ev);
 			const status = REFUSED.exec(reason)?.[1];
 			if (status) refusedBy = Number(status);
@@ -227,6 +293,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		dispose() {
 			disposed = true;
 			cancelRetry?.();
+			// 看门狗也得收摊,不然 koishi 卸载插件之后它还会醒一次。
+			clearWatchdog();
 			try {
 				socket?.close(1000, "plugin disposed");
 			} catch {
