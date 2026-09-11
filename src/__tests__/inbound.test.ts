@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { inboundOf } from "../inbound";
+import { jsonElement, miniAppCardJson, structMsgCardJson } from "./cards";
 
 const ALL = { private: true, group: "with-links" } as const;
 
@@ -81,21 +82,8 @@ describe("正文", () => {
 });
 
 describe("分享卡", () => {
-	const card = (url: string) => ({
-		type: "json",
-		attrs: {
-			data: JSON.stringify({ app: "com.tencent.structmsg", meta: { news: { jumpUrl: url } } }),
-		},
-	});
-	const miniApp = (url: string) => ({
-		type: "json",
-		attrs: {
-			data: JSON.stringify({
-				app: "com.tencent.miniapp_01",
-				meta: { detail_1: { qqdocurl: url } },
-			}),
-		},
-	});
+	const card = (url: string) => jsonElement(structMsgCardJson(url));
+	const miniApp = (url: string) => jsonElement(miniAppCardJson(url));
 
 	/**
 	 * 🔴 **卡里的链接放 `cardLinks`,不拼进正文**(协议 1.4)。拼进正文就等于告诉 BN
@@ -114,11 +102,16 @@ describe("分享卡", () => {
 	});
 
 	it("正文里本来有话 → 正文照旧只有那句话", () => {
-		const out = inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }), ALL);
-		assert.equal(out?.text, "看这个");
-		assert.deepEqual(out && "cardLinks" in out ? out.cardLinks : undefined, [
-			"https://b23.tv/bbb",
-		]);
+		assert.deepEqual(
+			inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }), ALL),
+			{
+				scope: "group",
+				groupId: "g-42",
+				userId: "10086",
+				text: "看这个",
+				cardLinks: ["https://b23.tv/bbb"],
+			},
+		);
 	});
 
 	/** 群里已经有一张能点开播放的卡了 —— BN 读得出这一格就不会再回一张。 */
@@ -137,8 +130,7 @@ describe("分享卡", () => {
 	 * 群消息那道「含链接才驮」的闸要把两格算进去。漏了它,一张正文为空的分享卡就被挡在
 	 * 桥这一侧 —— 症状是「群里转 B 站卡片 BN 一声不吭」,而 BN 那头什么日志都没有。
 	 */
-	it("正文没链接、只有卡 → 照样驮(闸要看两格)", () => {
-		assert.ok(inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/d")] }), ALL));
+	it("正文没链接、只有小程序卡 → 照样驮(闸要看两格)", () => {
 		assert.ok(
 			inboundOf(session({ content: "看这个", elements: [miniApp("https://b23.tv/e")] }), ALL),
 		);

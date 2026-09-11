@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { arkRequestOf, arkToSegmentData, cardLinksOf, readMiniAppProbe } from "../onebot.ts";
+import { jsonElement, miniAppCardJson, structMsgCardJson } from "./cards";
 
 const CARD = {
 	kind: "miniapp-card",
@@ -80,14 +81,9 @@ describe("签回来的 ark", () => {
 });
 
 describe("分享卡里的链接", () => {
-	const bili = (url: string) =>
-		JSON.stringify({ app: "com.tencent.structmsg", meta: { news: { jumpUrl: url } } });
-	const miniApp = (url: string) =>
-		JSON.stringify({ app: "com.tencent.miniapp_01", meta: { detail_1: { qqdocurl: url } } });
-
 	it("抠得出来,顺序照原样", () => {
 		const links = cardLinksOf([
-			{ type: "json", attrs: { data: bili("https://b23.tv/aaa") } },
+			jsonElement(structMsgCardJson("https://b23.tv/aaa")),
 			{ type: "text", attrs: { content: "随便说点什么" } },
 		]);
 		assert.deepEqual(links, { cardLinks: ["https://b23.tv/aaa"], miniAppCardLinks: [] });
@@ -107,16 +103,16 @@ describe("分享卡里的链接", () => {
 	 * 「这是条普通链接」,BN 会对着同一张卡再回一张。
 	 */
 	it("小程序卡的进 miniAppCardLinks,不进 cardLinks", () => {
-		assert.deepEqual(
-			cardLinksOf([{ type: "json", attrs: { data: miniApp("https://b23.tv/ccc") } }]),
-			{ cardLinks: [], miniAppCardLinks: ["https://b23.tv/ccc"] },
-		);
+		assert.deepEqual(cardLinksOf([jsonElement(miniAppCardJson("https://b23.tv/ccc"))]), {
+			cardLinks: [],
+			miniAppCardLinks: ["https://b23.tv/ccc"],
+		});
 	});
 
 	it("一条消息里两种卡都有 → 各进各的格", () => {
 		const links = cardLinksOf([
-			{ type: "json", attrs: { data: bili("https://b23.tv/aaa") } },
-			{ type: "json", attrs: { data: miniApp("https://b23.tv/ccc") } },
+			jsonElement(structMsgCardJson("https://b23.tv/aaa")),
+			jsonElement(miniAppCardJson("https://b23.tv/ccc")),
 		]);
 		assert.deepEqual(links, {
 			cardLinks: ["https://b23.tv/aaa"],
@@ -126,7 +122,7 @@ describe("分享卡里的链接", () => {
 
 	it("跟 B 站没关系的卡不看", () => {
 		const other = JSON.stringify({ app: "x", meta: { a: "https://example.com/x" } });
-		assert.deepEqual(cardLinksOf([{ type: "json", attrs: { data: other } }]), {
+		assert.deepEqual(cardLinksOf([jsonElement(other)]), {
 			cardLinks: [],
 			miniAppCardLinks: [],
 		});
