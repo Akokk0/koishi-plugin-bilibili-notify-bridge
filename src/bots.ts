@@ -28,6 +28,18 @@ export interface KoishiBotLike {
  */
 export type ProbedCapabilities = (botId: string) => Partial<BridgeCapabilityReport> | undefined;
 
+/**
+ * `botId` —— koishi 自己也叫它 `sid`。平台 + 账号,一条连接内不会撞。
+ *
+ * 报名单、探能力、收到 `send` 时回查 bot、驮入站消息时说「这是谁收到的」,全都得拼出**同一个**
+ * 串;手拼一遍就是一次赌博,而拼歪了的症状是「BN 那边配好的推送目标忽然发不出去」。
+ * 没登上的 bot(两格里缺任一格)拼出来的东西不会跟任何真 id 相等 —— 调用方要么先挡掉,
+ * 要么就靠这一点。
+ */
+export function sidOf(bot: { platform?: string; selfId?: string }): string {
+	return `${bot.platform}:${bot.selfId}`;
+}
+
 export function botsOf(
 	bots: readonly KoishiBotLike[],
 	probed?: ProbedCapabilities,
@@ -35,11 +47,10 @@ export function botsOf(
 	return bots.flatMap((bot) => {
 		if (!bot.platform || !bot.selfId) return [];
 		const wire: BridgeBotWire = {
-			// koishi 自己也叫它 `sid`。平台 + 账号,一条连接内不会撞。
-			botId: `${bot.platform}:${bot.selfId}`,
+			botId: sidOf(bot),
 			platform: bot.platform,
 			selfId: bot.selfId,
-			capabilities: capabilitiesFor(bot.platform, probed?.(`${bot.platform}:${bot.selfId}`)),
+			capabilities: capabilitiesFor(bot.platform, probed?.(sidOf(bot))),
 		};
 		// 没有就不报这一格 —— 编一个「未命名」出来,面板上就再也分不出「没名字」和
 		// 「真的叫未命名」。

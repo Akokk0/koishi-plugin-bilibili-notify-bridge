@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { capabilitiesFor } from "../capabilities";
 import { deliverSend } from "../deliver";
 
 const PNG = Buffer.from("89504e470d0a1a0a", "hex");
@@ -39,6 +40,9 @@ function deps(over: Record<string, unknown> = {}) {
 				},
 			}),
 			fetchImage: async () => ({ data: PNG, mime: "image/png" }),
+			// 投递这一层不再自己算能力表(那会变成第二个来源)—— 接线那头喂的就是报给 BN
+			// 的那一份,这里照做。
+			capabilitiesOf: (_botId: string, platform: string) => capabilitiesFor(platform),
 			...over,
 		} as never,
 	};

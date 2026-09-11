@@ -11,7 +11,8 @@
  */
 
 import { Context, Schema } from "koishi";
-import { botsOf } from "./bots";
+import { botsOf, sidOf } from "./bots";
+import { capabilitiesFor } from "./capabilities";
 import { createBridgeClient } from "./client";
 import { deliverSend } from "./deliver";
 import { inboundOf } from "./inbound";
@@ -79,7 +80,7 @@ export function apply(ctx: Context, config: Config) {
 	async function probeMiniApp(bot: { platform?: string; selfId?: string }): Promise<void> {
 		const call = onebotInternalOf(bot);
 		if (!call || !bot.selfId) return;
-		const botId = `${bot.platform}:${bot.selfId}`;
+		const botId = sidOf(bot);
 		let state: BridgeCapabilityReport["miniAppCard"];
 		try {
 			await call("get_mini_app_ark", {});
@@ -92,6 +93,9 @@ export function apply(ctx: Context, config: Config) {
 
 	/** bot 名单是**全量快照**:变了就整份重推。 */
 	const pushBots = () => client.pushBots(botsOf([...ctx.bots], (botId) => probed.get(botId)));
+
+	/** 按 `botId` 回查那个 bot —— 名单是我们自己报上去的,所以查不到通常意味着它刚掉线。 */
+	const botBySid = (botId: string) => ctx.bots.find((bot) => sidOf(bot) === botId);
 
 	const client = createBridgeClient({
 		url: config.url,
@@ -107,13 +111,16 @@ export function apply(ctx: Context, config: Config) {
 		},
 		deliver: (frame) =>
 			deliverSend(frame, {
-				botOf: (botId) => ctx.bots.find((bot) => `${bot.platform}:${bot.selfId}` === botId),
+				botOf: botBySid,
+				// 报给 BN 的那份能力表(`bots.ts` 拼名单时用的是同一个表达式),不让投递那一层
+				// 自己再算一遍 —— 两份漂开了,面板说的和真发时按的就是两回事。
+				capabilitiesOf: (botId, platform) => capabilitiesFor(platform, probed.get(botId)),
 				/**
 				 * 向腾讯签一张小程序卡。签不下来回 `null`,上层会退成文字 —— **别抛**:
 				 * 抛了整条推送就成了失败,而其实退成文字是发得出去的。
 				 */
 				async signMiniApp(botId, card) {
-					const bot = ctx.bots.find((b) => `${b.platform}:${b.selfId}` === botId);
+					const bot = botBySid(botId);
 					const call = bot ? onebotInternalOf(bot) : undefined;
 					if (!call) return null;
 					try {
@@ -165,6 +172,6 @@ export function apply(ctx: Context, config: Config) {
 			subscription,
 		);
 		if (!message) return;
-		client.pushInbound(`${session.platform}:${session.selfId}`, session.platform, message);
+		client.pushInbound(sidOf(session), session.platform, message);
 	});
 }

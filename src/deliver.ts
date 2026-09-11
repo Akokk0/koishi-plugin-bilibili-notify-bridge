@@ -7,9 +7,8 @@
  */
 
 import h from "@satorijs/element";
-import { capabilitiesFor } from "./capabilities";
 import { imageUrlsIn, renderMessage, type RenderedImage } from "./message";
-import type { BridgeSendFrame } from "./protocol";
+import type { BridgeCapabilityReport, BridgeSendFrame } from "./protocol";
 
 /** koishi 的 `Bot` 上我们真用到的那两格。 */
 export interface SendableBot {
@@ -19,6 +18,12 @@ export interface SendableBot {
 
 export interface DeliverDeps {
 	botOf(botId: string): SendableBot | undefined;
+	/**
+	 * 这个 bot 的能力表。**必须是握手时报给 BN 的那一份**(`bots.ts`)——这一层自己再算一遍
+	 * 的话就有了两个来源:面板上写着「能 @全体」,而真发时按的是另一份表。适配器碰到不认识
+	 * 的元素是**静默丢弃**的,所以两份漂开了谁也不会收到报错。
+	 */
+	capabilitiesOf(botId: string, platform: string): BridgeCapabilityReport;
 	/** 把 BN 那条一次性 URL 取回来。取不到就抛,这一层接住。 */
 	fetchImage(url: string): Promise<RenderedImage>;
 	/**
@@ -56,7 +61,7 @@ export async function deliverSend(
 				return { ok: true };
 			}
 		}
-		const capabilities = capabilitiesFor(frame.platform);
+		const capabilities = deps.capabilitiesOf(frame.botId, frame.platform);
 		const content = renderMessage(frame.message, {
 			images,
 			atAll: capabilities.atAll === "supported",
