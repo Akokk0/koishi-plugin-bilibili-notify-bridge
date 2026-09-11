@@ -53,11 +53,10 @@ export function inboundOf(
 	// 之外没有别的档。
 	if (session.isDirect ? !subscription.private : subscription.group !== "with-links") return null;
 
-	const text = plainTextOf(session.content);
-
 	// 私聊那一支**只有正文**(协议 §5.3):BN 的私聊入口只有指令,指令不认链接。所以卡在
 	// 这条路上不解、也不拼 —— 拼进去的话主人在私聊里转一张卡,BN 会拿一串 URL 去匹配指令。
 	if (session.isDirect) {
+		const text = plainTextOf(session.content);
 		return text === "" ? null : { scope: "private", userId: session.userId, text };
 	}
 
@@ -68,7 +67,19 @@ export function inboundOf(
 
 	// 「含链接才驮」那道闸要把两格算进去:群里转一张 B 站卡时正文常常是空的,只看正文的话
 	// 这条消息在桥这一侧就没了 —— 症状是「群里发卡片 BN 一声不吭」,而 BN 那头什么都没收到。
-	if (!HAS_LINK.test(text) && cardLinks.length === 0 && miniAppCardLinks.length === 0) return null;
+	const hasCard = cardLinks.length > 0 || miniAppCardLinks.length > 0;
+
+	// **超集闸**:先拿**原文**挡一道,挡掉的不必再解元素树。koishi 往 content 里只转义
+	// `&` `<` `>`,`https://` 这个前缀在原文里一定原样在着 —— 所以「原文里没有」⇒「剥完也
+	// 没有」,这一闸只会放过、不会误杀。群里绝大多数消息既没链接也没卡,今天它们每一条都要
+	// 先付一次解析元素树的钱再被丢掉(实测 1441ns/条 vs 正则 18ns/条)。
+	if (!hasCard && !HAS_LINK.test(session.content)) return null;
+
+	const text = plainTextOf(session.content);
+
+	// 剥完再判一次**精确**的:上面那道是超集,`<img src="http://…"/>` 这种只有元素标记里有
+	// 链接的照样过得去,得在这儿拦下 —— 不然主人在群里发一张图,BN 回一张莫名其妙的卡。
+	if (!hasCard && !HAS_LINK.test(text)) return null;
 
 	// 空的那格不带上去:群消息是这条桥最大的一股流量,而缺省与「这条没有那种卡」同义。
 	return {
