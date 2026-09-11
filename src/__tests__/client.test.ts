@@ -94,7 +94,7 @@ describe("握手", () => {
 		sockets[0]?.fire("open");
 		assert.deepEqual(sockets[0]?.sent[0], {
 			type: "hello",
-			protocol: { major: 1, minor: 2 },
+			protocol: { major: 1, minor: 3 },
 			bridge: { kind: "koishi", name: "koishi", version: "0.0.1" },
 			bots: BOTS,
 		});
@@ -112,6 +112,12 @@ describe("活着", () => {
 		connect();
 		sockets[0]?.say({ type: "ping" });
 		assert.deepEqual(sockets[0]?.last("pong"), { type: "pong" });
+	});
+
+	it("带 id 的 ping 是面板在探活:pong 原样回 id,BN 才量得出这一趟的往返", () => {
+		connect();
+		sockets[0]?.say({ type: "ping", id: "probe-1" });
+		assert.deepEqual(sockets[0]?.last("pong"), { type: "pong", id: "probe-1" });
 	});
 
 	it("不认识的帧当没看见,连接照旧", () => {

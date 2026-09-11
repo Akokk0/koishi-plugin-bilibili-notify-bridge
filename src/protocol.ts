@@ -11,7 +11,7 @@
  */
 
 /** 判定只看 `major`。加可选字段 / 加帧类型只升 minor;改字段含义或删字段才升 major。 */
-export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 2 } as const;
+export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 3 } as const;
 
 /** 这个桥**必报**的六项能力(协议 §7)。 */
 export const BRIDGE_CAPABILITIES = [
@@ -96,7 +96,8 @@ export interface BridgeWelcomeFrame {
 export type ServerToBridgeFrame =
 	| BridgeWelcomeFrame
 	| BridgeSendFrame
-	| { type: "ping" }
+	/** 1.3 起可选 `id`:带了就是面板在探活,`pong` 要原样回它。 */
+	| { type: "ping"; id?: string }
 	| { type: "error"; message: string };
 
 export type BridgeToServerFrame =
@@ -109,7 +110,7 @@ export type BridgeToServerFrame =
 	| { type: "bots"; bots: BridgeBotWire[] }
 	| { type: "inbound"; botId: string; platform: string; message: BridgeInboundMessage }
 	| { type: "result"; id: string; ok: boolean; err?: string }
-	| { type: "pong" };
+	| { type: "pong"; id?: string };
 
 /**
  * BN 主动断连时给的码。**这几档别重连** —— 再试一次也是同样的结果,该把错显示给用户:

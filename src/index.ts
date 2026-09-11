@@ -101,9 +101,9 @@ export function apply(ctx: Context, config: Config) {
 		// 现取:重连时报的是**那一刻**的名单,不是插件启动时的。
 		bots: () => botsOf([...ctx.bots], (botId) => probed.get(botId)),
 		version: VERSION,
+		// 「已连上」那一行由 client 打(它手里有 BN 的版本号),这里不再重复一遍。
 		onWelcome: (next) => {
 			subscription = next;
-			log.info("已连上 bilibili-notify");
 		},
 		deliver: (frame) =>
 			deliverSend(frame, {

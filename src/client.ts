@@ -140,12 +140,15 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 				// 循环会一直用最短那档去捶 BN。
 				attempt = 0;
 				const server = frame.server as { version?: string } | undefined;
-				opts.log.info(`连上 BN v${server?.version ?? "?"}`);
+				opts.log.info(`已连上 bilibili-notify v${server?.version ?? "?"}`);
 				opts.onWelcome(frame.inbound as BridgeInboundSubscription);
 				break;
 			}
 			case "ping":
-				socket?.send(JSON.stringify({ type: "pong" }));
+				// 带 id 的是面板在探活(量往返),原样回;心跳的不带。
+				socket?.send(
+					JSON.stringify(typeof frame.id === "string" ? { type: "pong", id: frame.id } : { type: "pong" }),
+				);
 				break;
 			case "send":
 				void onSend(frame as unknown as BridgeSendFrame);
