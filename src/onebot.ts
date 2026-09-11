@@ -3,6 +3,9 @@
  * (`apps/server/src/platforms/onebot.ts` / `onebot-inbound.ts`),它是真机验过的。
  *
  * 这里的每一处都栽过人,所以每一处都写清了为什么。
+ *
+ * ⛔ **不能 import BN 的包**(这个插件独立发版、装在别人的 koishi 里),所以那边的判据在
+ * 这里是抄的第二份 —— 改之前先去对一眼原件。
  */
 
 import type { BridgeCapabilityState, BridgeMessage } from "./protocol.ts";
@@ -87,29 +90,36 @@ export interface CardElementLike {
 }
 
 /**
- * 群里那张分享卡里的链接,按出现顺序。
+ * 群里那张分享卡里的链接,按出现顺序,**分两格**(协议 1.4 的 `cardLinks` /
+ * `miniAppCardLinks`)。分类判据照 BN 自己那份抄
+ * (`apps/server/src/platforms/onebot-inbound.ts` 的 `extractCardLinks`)—— 直连那路与
+ * 经桥那路交给链接解析的东西必须是同一个形状,不然同一张卡两条路上的行为会分叉。
  *
- * 🔴 **小程序卡的一律不抠。** BN 内部本来有单独一格 `miniAppCardLinks` 专门「不回卡」
- * (群里已经有一张能点开播放的卡了),但**桥协议只有正文一格** —— 拼进正文就等于告诉 BN
- * 「这是条普通链接」,它会再回一张。少一次回卡,好过多一次刷屏。
+ * 🔴 **小程序卡的单独一格。** BN 的链接解析**刻意不读** `miniAppCardLinks`:群里已经有
+ * 一张能点开播放的卡了,再回一张都是重复。混进 `cardLinks`(或者像协议 1.3 那样拼进正文)
+ * 就等于告诉 BN「这是条用户敲的普通链接」,它会对着同一张卡再回一张。
  *
  * json 先 `JSON.parse` 再逐字符串找:结构化消息里是 `https:\/\/…` 这种转义写法,对着原文
  * 找是找不到的;解析不动就退回原文找。xml 只需把 `&amp;` 还原。
  */
-export function shareCardLinksOf(elements: readonly CardElementLike[]): string[] {
-	const out: string[] = [];
+export function cardLinksOf(elements: readonly CardElementLike[]): {
+	cardLinks: string[];
+	miniAppCardLinks: string[];
+} {
+	const cardLinks: string[] = [];
+	const miniAppCardLinks: string[] = [];
 	for (const element of elements) {
 		if (element.type !== "json" && element.type !== "xml") continue;
 		const raw = element.attrs?.data;
 		if (typeof raw !== "string" || raw.length > MAX_CARD_CHARS) continue;
 		if (!CARD_HOST_HINT.test(raw)) continue;
 		const card = cardStrings(element.type, raw);
-		if (card.miniApp) continue;
+		const into = card.miniApp ? miniAppCardLinks : cardLinks;
 		for (const s of card.strings) {
-			for (const m of s.matchAll(URL_RE)) out.push(m[0]);
+			for (const m of s.matchAll(URL_RE)) into.push(m[0]);
 		}
 	}
-	return out;
+	return { cardLinks, miniAppCardLinks };
 }
 
 function cardStrings(type: "json" | "xml", raw: string): { strings: string[]; miniApp: boolean } {

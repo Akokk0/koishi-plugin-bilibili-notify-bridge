@@ -87,25 +87,85 @@ describe("分享卡", () => {
 			data: JSON.stringify({ app: "com.tencent.structmsg", meta: { news: { jumpUrl: url } } }),
 		},
 	});
-
-	/**
-	 * 协议 §5.3 要求桥把分享卡里的链接**拼进正文**再发上来 —— 帧里没有单独放它的地方。
-	 * 群里有人转一张 B 站分享卡时,正文常常是空的,不拼就等于这条消息不存在。
-	 */
-	it("卡里的链接拼进正文,哪怕正文本来是空的", () => {
-		const out = inboundOf(
-			session({ content: "", elements: [card("https://b23.tv/aaa")] }),
-			ALL,
-		);
-		assert.ok(out?.text.includes("https://b23.tv/aaa"), out?.text);
+	const miniApp = (url: string) => ({
+		type: "json",
+		attrs: {
+			data: JSON.stringify({
+				app: "com.tencent.miniapp_01",
+				meta: { detail_1: { qqdocurl: url } },
+			}),
+		},
 	});
 
-	it("正文里本来有话就跟在后面", () => {
-		const out = inboundOf(
-			session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }),
-			ALL,
+	/**
+	 * 🔴 **卡里的链接放 `cardLinks`,不拼进正文**(协议 1.4)。拼进正文就等于告诉 BN
+	 * 「这是用户敲的一条普通链接」—— 正文那一格从此不再是用户敲的那句话,而小程序卡更糟:
+	 * BN 会对着一张已经能点开播放的卡再回一张。
+	 */
+	it("卡里的链接单独一格,正文不被污染(正文本来是空的也驮)", () => {
+		const out = inboundOf(session({ content: "", elements: [card("https://b23.tv/aaa")] }), ALL);
+		assert.deepEqual(out, {
+			scope: "group",
+			groupId: "g-42",
+			userId: "10086",
+			text: "",
+			cardLinks: ["https://b23.tv/aaa"],
+		});
+	});
+
+	it("正文里本来有话 → 正文照旧只有那句话", () => {
+		const out = inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }), ALL);
+		assert.equal(out?.text, "看这个");
+		assert.deepEqual(out && "cardLinks" in out ? out.cardLinks : undefined, [
+			"https://b23.tv/bbb",
+		]);
+	});
+
+	/** 群里已经有一张能点开播放的卡了 —— BN 读得出这一格就不会再回一张。 */
+	it("小程序卡的链接进 miniAppCardLinks,不进 cardLinks、也不进正文", () => {
+		const out = inboundOf(session({ content: "", elements: [miniApp("https://b23.tv/ccc")] }), ALL);
+		assert.deepEqual(out, {
+			scope: "group",
+			groupId: "g-42",
+			userId: "10086",
+			text: "",
+			miniAppCardLinks: ["https://b23.tv/ccc"],
+		});
+	});
+
+	/**
+	 * 群消息那道「含链接才驮」的闸要把两格算进去。漏了它,一张正文为空的分享卡就被挡在
+	 * 桥这一侧 —— 症状是「群里转 B 站卡片 BN 一声不吭」,而 BN 那头什么日志都没有。
+	 */
+	it("正文没链接、只有卡 → 照样驮(闸要看两格)", () => {
+		assert.ok(inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/d")] }), ALL));
+		assert.ok(
+			inboundOf(session({ content: "看这个", elements: [miniApp("https://b23.tv/e")] }), ALL),
 		);
-		assert.ok(out?.text.startsWith("看这个"));
-		assert.ok(out?.text.includes("https://b23.tv/bbb"));
+	});
+
+	/** 没卡的消息不多带两格空数组上去 —— 群消息是这条桥最大的一股流量。 */
+	it("没有卡就一格都不带", () => {
+		assert.deepEqual(inboundOf(session(), ALL), {
+			scope: "group",
+			groupId: "g-42",
+			userId: "10086",
+			text: "看看这个 https://b23.tv/x",
+		});
+	});
+
+	/** 私聊只有指令,指令不认链接 —— 协议私聊那一支没有这两格,别顺手拼进正文。 */
+	it("私聊里的卡不拼进正文;剥完没话就不驮", () => {
+		assert.equal(
+			inboundOf(session({ isDirect: true, content: "", elements: [card("https://b23.tv/f")] }), ALL),
+			null,
+		);
+		assert.deepEqual(
+			inboundOf(
+				session({ isDirect: true, content: "/help", elements: [card("https://b23.tv/f")] }),
+				ALL,
+			),
+			{ scope: "private", userId: "10086", text: "/help" },
+		);
 	});
 });

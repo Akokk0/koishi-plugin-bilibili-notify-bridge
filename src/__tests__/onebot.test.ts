@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { arkRequestOf, arkToSegmentData, readMiniAppProbe, shareCardLinksOf } from "../onebot.ts";
+import { arkRequestOf, arkToSegmentData, cardLinksOf, readMiniAppProbe } from "../onebot.ts";
 
 const CARD = {
 	kind: "miniapp-card",
@@ -82,45 +82,60 @@ describe("签回来的 ark", () => {
 describe("分享卡里的链接", () => {
 	const bili = (url: string) =>
 		JSON.stringify({ app: "com.tencent.structmsg", meta: { news: { jumpUrl: url } } });
+	const miniApp = (url: string) =>
+		JSON.stringify({ app: "com.tencent.miniapp_01", meta: { detail_1: { qqdocurl: url } } });
 
 	it("抠得出来,顺序照原样", () => {
-		const links = shareCardLinksOf([
+		const links = cardLinksOf([
 			{ type: "json", attrs: { data: bili("https://b23.tv/aaa") } },
 			{ type: "text", attrs: { content: "随便说点什么" } },
 		]);
-		assert.deepEqual(links, ["https://b23.tv/aaa"]);
+		assert.deepEqual(links, { cardLinks: ["https://b23.tv/aaa"], miniAppCardLinks: [] });
 	});
 
 	/** 结构化消息里是 `https:\/\/…` 这种转义写法,对着原文找是找不到的。 */
 	it("转义过的斜杠也找得到", () => {
-		const links = shareCardLinksOf([
+		const links = cardLinksOf([
 			{ type: "json", attrs: { data: '{"meta":{"a":"https:\\/\\/b23.tv\\/bbb"}}' } },
 		]);
-		assert.deepEqual(links, ["https://b23.tv/bbb"]);
+		assert.deepEqual(links.cardLinks, ["https://b23.tv/bbb"]);
 	});
 
 	/**
-	 * 🔴 **小程序卡里的链接不交上去。** 群里已经有一张能点开播放的卡了,BN 那侧本来有
-	 * 单独一格 `miniAppCardLinks` 专门不回卡 —— 但**桥协议只有正文一格**,拼进正文就等于
-	 * 说「这是条普通链接」,BN 会再回一张。少一次回卡,好过多一次刷屏。
+	 * 🔴 **小程序卡的链接单独一格**(协议 1.4)。BN 那侧的 `miniAppCardLinks` 专门不回卡 ——
+	 * 群里已经有一张能点开播放的卡了。混进 `cardLinks`(或者像 1.3 那样拼进正文)就等于说
+	 * 「这是条普通链接」,BN 会对着同一张卡再回一张。
 	 */
-	it("小程序卡的不抠 —— 拼进正文 BN 会再回一张卡", () => {
-		const miniApp = JSON.stringify({
-			app: "com.tencent.miniapp_01",
-			meta: { detail_1: { qqdocurl: "https://b23.tv/ccc" } },
+	it("小程序卡的进 miniAppCardLinks,不进 cardLinks", () => {
+		assert.deepEqual(
+			cardLinksOf([{ type: "json", attrs: { data: miniApp("https://b23.tv/ccc") } }]),
+			{ cardLinks: [], miniAppCardLinks: ["https://b23.tv/ccc"] },
+		);
+	});
+
+	it("一条消息里两种卡都有 → 各进各的格", () => {
+		const links = cardLinksOf([
+			{ type: "json", attrs: { data: bili("https://b23.tv/aaa") } },
+			{ type: "json", attrs: { data: miniApp("https://b23.tv/ccc") } },
+		]);
+		assert.deepEqual(links, {
+			cardLinks: ["https://b23.tv/aaa"],
+			miniAppCardLinks: ["https://b23.tv/ccc"],
 		});
-		assert.deepEqual(shareCardLinksOf([{ type: "json", attrs: { data: miniApp } }]), []);
 	});
 
 	it("跟 B 站没关系的卡不看", () => {
 		const other = JSON.stringify({ app: "x", meta: { a: "https://example.com/x" } });
-		assert.deepEqual(shareCardLinksOf([{ type: "json", attrs: { data: other } }]), []);
+		assert.deepEqual(cardLinksOf([{ type: "json", attrs: { data: other } }]), {
+			cardLinks: [],
+			miniAppCardLinks: [],
+		});
 	});
 
 	it("xml 卡也认,&amp; 要还原", () => {
-		const links = shareCardLinksOf([
+		const links = cardLinksOf([
 			{ type: "xml", attrs: { data: '<msg url="https://b23.tv/d?a=1&amp;b=2"/>' } },
 		]);
-		assert.deepEqual(links, ["https://b23.tv/d?a=1&b=2"]);
+		assert.deepEqual(links.cardLinks, ["https://b23.tv/d?a=1&b=2"]);
 	});
 });

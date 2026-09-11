@@ -6,7 +6,7 @@
  */
 
 import h from "@satorijs/element";
-import { type CardElementLike, shareCardLinksOf } from "./onebot";
+import { type CardElementLike, cardLinksOf } from "./onebot";
 import type { BridgeInboundMessage, BridgeInboundSubscription } from "./protocol";
 
 /** 只依赖这几格 —— 写全 koishi 的 `Session` 等于把整个框架焊进这一层。 */
@@ -53,13 +53,30 @@ export function inboundOf(
 	// 之外没有别的档。
 	if (session.isDirect ? !subscription.private : subscription.group !== "with-links") return null;
 
-	// 分享卡里的链接**拼进正文**(协议 §5.3:帧里没有单独放它的地方)。群里转一张 B 站
-	// 分享卡时正文常常是空的,不拼就等于这条消息不存在。
-	const links = shareCardLinksOf(session.elements ?? []);
-	const text = [plainTextOf(session.content), ...links].filter((part) => part !== "").join(" ");
-	if (text === "") return null;
+	const text = plainTextOf(session.content);
 
-	if (session.isDirect) return { scope: "private", userId: session.userId, text };
-	if (!HAS_LINK.test(text)) return null;
-	return { scope: "group", groupId: session.channelId, userId: session.userId, text };
+	// 私聊那一支**只有正文**(协议 §5.3):BN 的私聊入口只有指令,指令不认链接。所以卡在
+	// 这条路上不解、也不拼 —— 拼进去的话主人在私聊里转一张卡,BN 会拿一串 URL 去匹配指令。
+	if (session.isDirect) {
+		return text === "" ? null : { scope: "private", userId: session.userId, text };
+	}
+
+	// 🔴 分享卡里的链接**单独两格**(协议 1.4),不拼进正文。拼进去等于告诉 BN「这是用户敲的
+	// 一条普通链接」—— 小程序卡因此会被回一张重复的卡(BN 那侧 `miniAppCardLinks` 刻意不解析,
+	// 正是为了不回)。老协议(1.3)没有这两格才只好拼,现在有了。
+	const { cardLinks, miniAppCardLinks } = cardLinksOf(session.elements ?? []);
+
+	// 「含链接才驮」那道闸要把两格算进去:群里转一张 B 站卡时正文常常是空的,只看正文的话
+	// 这条消息在桥这一侧就没了 —— 症状是「群里发卡片 BN 一声不吭」,而 BN 那头什么都没收到。
+	if (!HAS_LINK.test(text) && cardLinks.length === 0 && miniAppCardLinks.length === 0) return null;
+
+	// 空的那格不带上去:群消息是这条桥最大的一股流量,而缺省与「这条没有那种卡」同义。
+	return {
+		scope: "group",
+		groupId: session.channelId,
+		userId: session.userId,
+		text,
+		...(cardLinks.length > 0 ? { cardLinks } : {}),
+		...(miniAppCardLinks.length > 0 ? { miniAppCardLinks } : {}),
+	};
 }

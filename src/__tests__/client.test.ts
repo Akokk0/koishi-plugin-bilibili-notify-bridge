@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { BRIDGE_SILENCE_LIMIT_MS, createBridgeClient, type SocketLike } from "../client";
+import { BRIDGE_PROTOCOL_VERSION } from "../protocol";
 
 class FakeSocket implements SocketLike {
 	sent: Record<string, unknown>[] = [];
@@ -105,7 +106,9 @@ describe("握手", () => {
 		sockets[0]?.fire("open");
 		assert.deepEqual(sockets[0]?.sent[0], {
 			type: "hello",
-			protocol: { major: 1, minor: 3 },
+			// 报的就是这个插件声明的那一版。写死一个字面量的话每升一次 minor 都得来改一次,
+			// 而改完什么也没多证明 —— 版本号本身对不对由 PROTOCOL.md 与 BN 的 major 判定说了算。
+			protocol: BRIDGE_PROTOCOL_VERSION,
 			bridge: { kind: "koishi", name: "koishi", version: "0.0.1" },
 			bots: BOTS,
 		});

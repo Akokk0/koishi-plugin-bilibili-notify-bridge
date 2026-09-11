@@ -11,7 +11,7 @@
  */
 
 /** 判定只看 `major`。加可选字段 / 加帧类型只升 minor;改字段含义或删字段才升 major。 */
-export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 3 } as const;
+export const BRIDGE_PROTOCOL_VERSION = { major: 1, minor: 4 } as const;
 
 /** 这个桥**必报**的六项能力(协议 §7)。 */
 export const BRIDGE_CAPABILITIES = [
@@ -68,8 +68,22 @@ export type BridgeMessage =
 	  };
 
 export type BridgeInboundMessage =
+	/** 私聊**只有正文**:BN 的私聊入口只有指令,指令不认链接。 */
 	| { scope: "private"; userId: string; text: string }
-	| { scope: "group"; groupId: string; userId: string; text: string };
+	| {
+			scope: "group";
+			groupId: string;
+			userId: string;
+			/** 用户敲的那句话,**只是那句话** —— 卡里的链接放下面两格,别拼进来。 */
+			text: string;
+			/** 1.4 起:普通分享卡里的链接。BN 跟正文里的链接一样解析。 */
+			cardLinks?: string[];
+			/**
+			 * 1.4 起:**B 站小程序卡**(`com.tencent.miniapp_01`)里的链接。BN 读得出这一格
+			 * 就**不会回卡** —— 群里已经有一张能点开播放的了。混进 `cardLinks` 就等于让它再回一张。
+			 */
+			miniAppCardLinks?: string[];
+	  };
 
 /** BN 要什么入站消息。桥在**自己这侧**过滤,省的是带宽与隐私。 */
 export interface BridgeInboundSubscription {
