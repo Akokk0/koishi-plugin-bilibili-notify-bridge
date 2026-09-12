@@ -11,6 +11,8 @@ import type { BridgeInboundMessage, BridgeInboundSubscription } from "./protocol
 
 /** 只依赖这几格 —— 写全 koishi 的 `Session` 等于把整个框架焊进这一层。 */
 export interface SessionLike {
+	/** 收到这条消息的那个 bot 在哪个平台上 —— 拼 `botId` 要它。 */
+	platform: string;
 	selfId: string;
 	userId: string;
 	/** 消息所在的频道。群消息拿它当群号 —— BN 回卡也回到这儿。 */
@@ -30,11 +32,17 @@ const HAS_LINK = /https?:\/\/\S+/i;
  *
  * 原样驮上去的话,BN 会把 `<img src="http://…"/>` 里那条 URL 当成正文里的链接去解析 ——
  * 症状是主人在群里发一张图,BN 回一张莫名其妙的卡。
+ *
+ * 🔴 `<quote>` 整棵**先摘掉**:koishi 把被回复的那条整个塞进它的子元素里,而协议 §5.3 要的
+ * 是「用户敲的那句话」。留着的症状是主人回复一条三天前的视频链接说「这个我看过」,BN 对着
+ * 那条老链接又回一张卡。`toString(true)` 是 satori 自己的「剥成纯文本」,与手写的深选 text
+ * 等价 —— 少一份会跟着 satori 漂的手抄实现。
  */
 function plainTextOf(content: string): string {
 	return h
-		.select(h.parse(content), "text")
-		.map((element) => String(element.attrs.content ?? ""))
+		.parse(content)
+		.filter((element) => element.type !== "quote")
+		.map((element) => element.toString(true))
 		.join("")
 		.trim();
 }
@@ -42,9 +50,23 @@ function plainTextOf(content: string): string {
 export function inboundOf(
 	session: SessionLike,
 	subscription: BridgeInboundSubscription,
+	/**
+	 * 「这个人是不是这台 koishi 借给 BN 的某个 bot」。传谓词而不是一份名单:群消息是这条桥
+	 * 最大的一股流量,每条消息重建一次集合是白烧的,而**缓存一份的话它会漂**(主人随时会在
+	 * koishi 里加一个 bot)。生产里它直接查 koishi 自己那张按 `botId` 索引的表。
+	 */
+	isOurs: (platform: string, userId: string) => boolean,
 ): BridgeInboundMessage | null {
 	// 🔴 bot 自己发的一律不驮。漏了它,BN 会解析自己刚发出去的那条链接再回一张卡 —— 无限回卡。
 	if (session.userId === session.selfId) return null;
+
+	// 🔴 **兄弟 bot 发的同样不驮。** 同一台 koishi 借出去两个号、都在同一个群里时,A 推出去的
+	// 那张卡在 B 眼里是「别人发的消息」—— 上面那道自检拦不住它,而它里面正带着一条 B 站链接:
+	// 驮上去 BN 就对着自己刚发的链接再回一张,链接解析的冷却配成 0 就是死循环。
+	//
+	// ⚠️ 代价:**另一个借出去的 bot 真·手动发的链接也被丢掉了**。两头不对称得很明显 ——
+	// 这头是重复回卡乃至死循环,那头只是少解析一条链接。
+	if (isOurs(session.platform, session.userId)) return null;
 
 	// 订阅闸**排在剥正文之前**。BN 眼下不收这一档的话,下面那两步(解一遍元素树、把分享卡的
 	// json/xml 拆开)全是白干的 —— 而群消息是这条桥最大的一股流量,`group: "none"` 时每一条

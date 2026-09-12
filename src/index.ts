@@ -173,6 +173,7 @@ export function apply(ctx: Context, config: Config) {
 		// 过滤在这一侧做(协议 §8),省的是带宽与隐私;群白名单那种策略仍归 BN 判。
 		const message = inboundOf(
 			{
+				platform: session.platform,
 				selfId: session.selfId,
 				userId: session.userId,
 				channelId: session.channelId,
@@ -182,8 +183,11 @@ export function apply(ctx: Context, config: Config) {
 				elements: session.elements ?? [],
 			},
 			subscription,
+			// 「发这条的是不是我们借出去的某个 bot」—— 查 koishi 自己那张按 `botId` 索引的表,
+			// 现查不缓存:主人随时会在 koishi 里加一个 bot。
+			(platform, userId) => ctx.bots[sidOf({ platform, selfId: userId })] !== undefined,
 		);
 		if (!message) return;
-		client.pushInbound(sidOf(session), session.platform, message);
+		client.pushInbound(session.sid, session.platform, message);
 	});
 }

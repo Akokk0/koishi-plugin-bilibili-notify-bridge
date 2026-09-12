@@ -8,32 +8,65 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { inboundOf } from "../inbound";
+import h from "@satorijs/element";
+import { type SessionLike, inboundOf } from "../inbound";
 import { jsonElement, miniAppCardJson, structMsgCardJson } from "./cards";
 
 const ALL = { private: true, group: "with-links" } as const;
 
-function session(over: Record<string, unknown> = {}) {
+/**
+ * 这台 koishi 借给 BN 的那份 bot 名单(`botId` = 平台:账号)。默认两个:收消息的那个
+ * 自己(`onebot:10000`),和一个兄弟 bot(`onebot:20000`)—— 同一台 koishi 借出去两个
+ * QQ 号、两个都在同一个群里,是真会发生的配置。
+ */
+const OURS = new Set(["onebot:10000", "onebot:20000"]);
+/** 生产里这一格查的是 koishi 自己那张按 `botId` 索引的表(`ctx.bots[botId]`)。 */
+const isOurs = (platform: string, userId: string) => OURS.has(`${platform}:${userId}`);
+
+function session(over: Partial<SessionLike> = {}): SessionLike {
 	return {
+		platform: "onebot",
 		selfId: "10000",
 		userId: "10086",
 		channelId: "g-42",
 		isDirect: false,
 		content: "看看这个 https://b23.tv/x",
 		...over,
-	} as never;
+	};
 }
 
 describe("排掉 bot 自己", () => {
 	/** 🔴 漏了它,BN 会解析自己刚发出去的那条链接,然后再发一张卡 —— 无限回卡。 */
 	it("发信人就是这个 bot → 不驮", () => {
-		assert.equal(inboundOf(session({ userId: "10000" }), ALL), null);
+		assert.equal(inboundOf(session({ userId: "10000" }), ALL, isOurs), null);
+	});
+
+	/**
+	 * 🔴 **兄弟 bot 发的也不驮。** 同一台 koishi 借出去两个号、都在同一个群里时,A 推出去的
+	 * 那条卡(里面有 B 站链接)在 B 眼里是「别人发的消息」—— 驮上去 BN 就对着自己刚发的
+	 * 链接再回一张卡;链接解析的冷却配成 0 就是死循环。
+	 *
+	 * ⚠️ 代价是**另一个借出去的 bot 真·手动发的链接也会被丢掉**。这一头是「重复回卡 /
+	 * 死循环」,那一头是「少解析一条链接」,不对称得很明显。
+	 */
+	it("兄弟 bot(同一台 koishi 借出去的另一个号)发的也不驮", () => {
+		assert.equal(inboundOf(session({ userId: "20000" }), ALL, isOurs), null);
+	});
+
+	/** 只挡自己人:普通用户照驮,不然这条桥就白搭了。 */
+	it("普通用户发的照驮", () => {
+		assert.ok(inboundOf(session({ userId: "10086" }), ALL, isOurs));
+	});
+
+	/** 名单按**平台**分:别的平台上那个同号数字与我们无关。 */
+	it("同号但不同平台的不算自己人", () => {
+		assert.ok(inboundOf(session({ platform: "kook", userId: "20000" }), ALL, isOurs));
 	});
 });
 
 describe("私聊", () => {
 	it("订阅要私聊就驮上去", () => {
-		assert.deepEqual(inboundOf(session({ isDirect: true, content: "/help" }), ALL), {
+		assert.deepEqual(inboundOf(session({ isDirect: true, content: "/help" }), ALL, isOurs), {
 			scope: "private",
 			userId: "10086",
 			text: "/help",
@@ -41,13 +74,16 @@ describe("私聊", () => {
 	});
 
 	it("订阅不要私聊就不驮", () => {
-		assert.equal(inboundOf(session({ isDirect: true }), { private: false, group: "none" }), null);
+		assert.equal(
+			inboundOf(session({ isDirect: true }), { private: false, group: "none" }, isOurs),
+			null,
+		);
 	});
 });
 
 describe("群消息", () => {
 	it("含链接的驮上去,群号用消息所在的那个频道", () => {
-		assert.deepEqual(inboundOf(session(), ALL), {
+		assert.deepEqual(inboundOf(session(), ALL, isOurs), {
 			scope: "group",
 			groupId: "g-42",
 			userId: "10086",
@@ -57,11 +93,11 @@ describe("群消息", () => {
 
 	/** BN 今天群里**没有指令入口**,群消息唯一的用途就是链接解析。 */
 	it("不含链接的不驮 —— 不然主人的每一条群聊都上传给 BN", () => {
-		assert.equal(inboundOf(session({ content: "今天天气不错" }), ALL), null);
+		assert.equal(inboundOf(session({ content: "今天天气不错" }), ALL, isOurs), null);
 	});
 
 	it("订阅说群消息一条都不要,含链接的也不驮", () => {
-		assert.equal(inboundOf(session(), { private: true, group: "none" }), null);
+		assert.equal(inboundOf(session(), { private: true, group: "none" }, isOurs), null);
 	});
 });
 
@@ -71,13 +107,34 @@ describe("正文", () => {
 		const out = inboundOf(
 			session({ content: '看看 <img src="http://x/y.png"/> https://b23.tv/x' }),
 			ALL,
+			isOurs,
 		);
 		assert.ok(out && !out.text.includes("<img"));
 		assert.ok(out?.text.includes("https://b23.tv/x"));
 	});
 
 	it("剥完只剩空白就不驮(一张图配一条链接才算数)", () => {
-		assert.equal(inboundOf(session({ content: '<img src="http://x/y.png"/>' }), ALL), null);
+		assert.equal(inboundOf(session({ content: '<img src="http://x/y.png"/>' }), ALL, isOurs), null);
+	});
+
+	/**
+	 * 🔴 **引用的那段不是用户敲的**(协议 §5.3:`text` 只是用户敲的那句话)。koishi 把被回复的
+	 * 那条整个放进 `<quote>` 的子元素里,深选 text 会把它一起捞出来 —— 症状是主人回复一条
+	 * 三天前的视频链接说「这个我看过」,BN 对着那条老链接又回一张卡。
+	 */
+	it("回复引用的那段不算正文", () => {
+		const quoted = h("quote", { id: "9" }, "老链接 https://b23.tv/old").toString();
+		const out = inboundOf(
+			session({ content: `${quoted}这个我看过 https://b23.tv/new` }),
+			ALL,
+			isOurs,
+		);
+		assert.equal(out?.text, "这个我看过 https://b23.tv/new");
+	});
+
+	it("链接只在引用里、自己没敲 → 不驮", () => {
+		const quoted = h("quote", { id: "9" }, "老链接 https://b23.tv/old").toString();
+		assert.equal(inboundOf(session({ content: `${quoted}这个我看过` }), ALL, isOurs), null);
 	});
 });
 
@@ -91,7 +148,11 @@ describe("分享卡", () => {
 	 * BN 会对着一张已经能点开播放的卡再回一张。
 	 */
 	it("卡里的链接单独一格,正文不被污染(正文本来是空的也驮)", () => {
-		const out = inboundOf(session({ content: "", elements: [card("https://b23.tv/aaa")] }), ALL);
+		const out = inboundOf(
+			session({ content: "", elements: [card("https://b23.tv/aaa")] }),
+			ALL,
+			isOurs,
+		);
 		assert.deepEqual(out, {
 			scope: "group",
 			groupId: "g-42",
@@ -103,7 +164,11 @@ describe("分享卡", () => {
 
 	it("正文里本来有话 → 正文照旧只有那句话", () => {
 		assert.deepEqual(
-			inboundOf(session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }), ALL),
+			inboundOf(
+				session({ content: "看这个", elements: [card("https://b23.tv/bbb")] }),
+				ALL,
+				isOurs,
+			),
 			{
 				scope: "group",
 				groupId: "g-42",
@@ -116,7 +181,11 @@ describe("分享卡", () => {
 
 	/** 群里已经有一张能点开播放的卡了 —— BN 读得出这一格就不会再回一张。 */
 	it("小程序卡的链接进 miniAppCardLinks,不进 cardLinks、也不进正文", () => {
-		const out = inboundOf(session({ content: "", elements: [miniApp("https://b23.tv/ccc")] }), ALL);
+		const out = inboundOf(
+			session({ content: "", elements: [miniApp("https://b23.tv/ccc")] }),
+			ALL,
+			isOurs,
+		);
 		assert.deepEqual(out, {
 			scope: "group",
 			groupId: "g-42",
@@ -132,13 +201,17 @@ describe("分享卡", () => {
 	 */
 	it("正文没链接、只有小程序卡 → 照样驮(闸要看两格)", () => {
 		assert.ok(
-			inboundOf(session({ content: "看这个", elements: [miniApp("https://b23.tv/e")] }), ALL),
+			inboundOf(
+				session({ content: "看这个", elements: [miniApp("https://b23.tv/e")] }),
+				ALL,
+				isOurs,
+			),
 		);
 	});
 
 	/** 没卡的消息不多带两格空数组上去 —— 群消息是这条桥最大的一股流量。 */
 	it("没有卡就一格都不带", () => {
-		assert.deepEqual(inboundOf(session(), ALL), {
+		assert.deepEqual(inboundOf(session(), ALL, isOurs), {
 			scope: "group",
 			groupId: "g-42",
 			userId: "10086",
@@ -149,13 +222,18 @@ describe("分享卡", () => {
 	/** 私聊只有指令,指令不认链接 —— 协议私聊那一支没有这两格,别顺手拼进正文。 */
 	it("私聊里的卡不拼进正文;剥完没话就不驮", () => {
 		assert.equal(
-			inboundOf(session({ isDirect: true, content: "", elements: [card("https://b23.tv/f")] }), ALL),
+			inboundOf(
+				session({ isDirect: true, content: "", elements: [card("https://b23.tv/f")] }),
+				ALL,
+				isOurs,
+			),
 			null,
 		);
 		assert.deepEqual(
 			inboundOf(
 				session({ isDirect: true, content: "/help", elements: [card("https://b23.tv/f")] }),
 				ALL,
+				isOurs,
 			),
 			{ scope: "private", userId: "10086", text: "/help" },
 		);
