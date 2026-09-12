@@ -8,7 +8,7 @@
  * 这里是抄的第二份 —— 改之前先去对一眼原件。
  */
 
-import type { BridgeCapabilityState, BridgeMessage } from "./protocol.ts";
+import type { BridgeCapabilityState, BridgeMessage } from "./protocol";
 
 /** 只跟 B 站有关的卡才往里翻。 */
 const CARD_HOST_HINT = /bilibili\.com|b23\.tv/i;
@@ -18,6 +18,15 @@ const MAX_CARD_DEPTH = 8;
 /** QQ 小程序卡的 `app`。B 站 App「分享到 QQ」发出的就是它。 */
 const MINIAPP_CARD_APP = "com.tencent.miniapp_01";
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
+/**
+ * 协议 §5.3 给这两格定的上限:每格最多 32 条、每条最长 2048 字符,**超了截断**(不是
+ * `4003` —— 为多出来的几条 URL 把整条桥打死,代价不对称)。
+ *
+ * BN 那侧照样会截,但截在**这一侧**才省得下带宽:一张 64 KB 的卡能抠出成百上千条 URL,
+ * 把这一帧往 1 MB 的 `maxPayload` 上推,而撞到那道门是整条连接断掉。
+ */
+const MAX_CARD_LINKS = 32;
+const MAX_CARD_LINK_CHARS = 2048;
 
 /**
  * 签一张小程序卡要给腾讯的参数。
@@ -83,10 +92,16 @@ export function arkToSegmentData(raw: unknown): string | null {
 	return null;
 }
 
-/** koishi 把收到的 `json` / `xml` 段原样变成同名元素,卡的正文在 `attrs.data`。 */
+/**
+ * koishi 把收到的 `json` / `xml` 段原样变成同名元素,卡的正文在 `attrs.data`。
+ *
+ * `attrs` 上的索引签名不是凑数:一条消息里混着的是各种元素(`text` 的 attrs 只有
+ * `content`、`img` 只有 `src`),koishi 那边就是 `Dict<any>`。只声明 `data` 一格的话,
+ * 随手拿一条真消息来测都过不了类型 —— 于是夹具会被改得不像真的。
+ */
 export interface CardElementLike {
 	type: string;
-	attrs?: { data?: unknown };
+	attrs?: { data?: unknown; [key: string]: unknown };
 }
 
 /**
@@ -116,7 +131,12 @@ export function cardLinksOf(elements: readonly CardElementLike[]): {
 		const card = cardStrings(element.type, raw);
 		const into = card.miniApp ? miniAppCardLinks : cardLinks;
 		for (const s of card.strings) {
-			for (const m of s.matchAll(URL_RE)) into.push(m[0]);
+			for (const m of s.matchAll(URL_RE)) {
+				// 协议 §5.3 的两道上限,各格各数各的:超长的那条丢掉、多出 32 条的截掉。
+				if (m[0].length > MAX_CARD_LINK_CHARS) continue;
+				if (into.length >= MAX_CARD_LINKS) break;
+				into.push(m[0]);
+			}
 		}
 	}
 	return { cardLinks, miniAppCardLinks };

@@ -125,4 +125,38 @@ describe("分享卡里的链接", () => {
 		]);
 		assert.deepEqual(links.cardLinks, ["https://b23.tv/d?a=1&b=2"]);
 	});
+
+	/**
+	 * 协议 §5.3 给这两格定了上限:每格最多 **32 条**、每条最长 **2048 字符**,超了**截断**
+	 * (不是 `4003` —— 为多出来的几条 URL 把整条桥打死,代价不对称)。BN 那侧照样会截,但
+	 * 截在**这一侧**才省得下带宽:一张 64 KB 的卡能抠出成百上千条 URL,把这一帧往 1 MB 的
+	 * `maxPayload` 上推,而撞到那道门是整条连接断掉。
+	 */
+	it("超长的那条丢掉,别的照收", () => {
+		const long = `https://b23.tv/${"a".repeat(2048)}`;
+		assert.ok(long.length > 2048);
+		const links = cardLinksOf([
+			{ type: "json", attrs: { data: JSON.stringify({ a: long, b: "https://b23.tv/ok" }) } },
+		]);
+		assert.deepEqual(links.cardLinks, ["https://b23.tv/ok"]);
+	});
+
+	it("一格顶多 32 条,第 33 条起截掉", () => {
+		const many = Array.from({ length: 40 }, (_v, i) => `https://b23.tv/n${i}`);
+		const links = cardLinksOf([{ type: "json", attrs: { data: JSON.stringify(many) } }]);
+		assert.equal(links.cardLinks.length, 32);
+		assert.equal(links.cardLinks[31], "https://b23.tv/n31");
+		assert.ok(!links.cardLinks.includes("https://b23.tv/n32"), "第 33 条没截掉");
+	});
+
+	/** 两格各数各的 —— 别让普通卡里的链接把小程序卡那一格的额度吃掉。 */
+	it("两格的额度各算各的", () => {
+		const many = Array.from({ length: 40 }, (_v, i) => `https://b23.tv/n${i}`);
+		const links = cardLinksOf([
+			{ type: "json", attrs: { data: JSON.stringify({ app: "x", meta: many }) } },
+			{ type: "json", attrs: { data: miniAppCardJson("https://b23.tv/mini") } },
+		]);
+		assert.equal(links.cardLinks.length, 32);
+		assert.deepEqual(links.miniAppCardLinks, ["https://b23.tv/mini"]);
+	});
 });
