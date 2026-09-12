@@ -15,8 +15,12 @@ import type { BridgeMessage, BridgeSegment } from "./protocol";
 
 export interface RenderedImage {
 	data: Uint8Array;
-	mime: string;
+	/** 取回来那一刻对头说的 Content-Type。**可能没有** —— 那就退回帧里声明的那一格。 */
+	mime?: string;
 }
+
+/** 两头都没说 mime 时兜的那个。重点不在它猜得对,在于**别落到 `base64://` 那条路上**。 */
+const FALLBACK_MIME = "application/octet-stream";
 
 export interface RenderContext {
 	/** 已经下载好的图,按帧里那条 URL 索引。 */
@@ -27,11 +31,19 @@ export interface RenderContext {
 	forward: boolean;
 }
 
-/** 拿不到就**抛**。发一条缺了图的推送比发不出去更难查。 */
-function imageOf(url: string, ctx: RenderContext): h {
+/**
+ * 拿不到就**抛**。发一条缺了图的推送比发不出去更难查。
+ *
+ * 🔴 **mime 必须给出一个**:`h.image(data, undefined)` 走的是已废弃的 `base64://` 前缀。
+ * onebot 忍得下,而 Telegram / Discord 那几个适配器是把 src 交给 `ctx.http.file()` 去解的 ——
+ * 解不动就整条发不出去,而且是静默的(消息没到、日志里只有一句适配器的内部错)。
+ *
+ * 顺序:取回来时对头说的 → 帧里声明的那一格(`declared`) → 兜底。
+ */
+function imageOf(url: string, ctx: RenderContext, declared?: string): h {
 	const image = ctx.images.get(url);
 	if (!image) throw new Error(`这张图没在手里,发不了:${url}`);
-	return h.image(image.data, image.mime);
+	return h.image(image.data, image.mime ?? declared ?? FALLBACK_MIME);
 }
 
 function segment(seg: BridgeSegment, ctx: RenderContext): h {
@@ -39,7 +51,8 @@ function segment(seg: BridgeSegment, ctx: RenderContext): h {
 		case "text":
 			return h.text(seg.text);
 		case "image":
-			return imageOf(seg.url, ctx);
+			// 段自己带着一格 mime(协议 §5.2)—— 取回来的对头没说时就靠它。
+			return imageOf(seg.url, ctx, seg.mime);
 		case "link":
 			// 链接怎么渲染归桥自己判(协议明说它**不是**能力项)。koishi 各平台都认纯文本
 			// 里的 URL,所以把地址原样写出来 —— 有标题就带上,让人知道那是什么。
@@ -72,7 +85,7 @@ export function renderMessage(message: BridgeMessage, ctx: RenderContext): h[] {
 		case "text":
 			return [h.text(message.text)];
 		case "image": {
-			const out = [imageOf(message.url, ctx)];
+			const out = [imageOf(message.url, ctx, message.mime)];
 			if (message.caption) out.push(h.text(message.caption));
 			return out;
 		}

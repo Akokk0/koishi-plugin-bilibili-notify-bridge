@@ -59,6 +59,42 @@ describe("图", () => {
 			/never/,
 		);
 	});
+
+	/**
+	 * 🔴 **mime 永远要给出一个**。`h.image(data, undefined)` 走的是已废弃的 `base64://`
+	 * 前缀:onebot 忍得下,而 Telegram / Discord 那几个适配器是把 src 交给 `ctx.http.file()`
+	 * 去解的 —— 解不动就整条发不出去,而且是静默的。
+	 *
+	 * 取回来的 Content-Type 缺了不要紧:`image` 段与 `composite` 里的图段,**帧里本来就带着
+	 * 一格 `mime`**(协议 §5.2),拿它顶上。
+	 */
+	it("取回来的图没带 mime → 用帧里声明的那个,不落 base64://", () => {
+		const out = render(
+			{ kind: "image", url: URL_A, mime: "image/jpeg" },
+			{ images: new Map([[URL_A, { data: PNG, mime: undefined }]]) },
+		);
+		assert.ok(out.includes("data:image/jpeg;base64,"), out);
+		assert.ok(!out.includes("base64://"), "落到已废弃的 base64:// 了");
+	});
+
+	it("复合消息里的图段也一样,用那一段自己声明的 mime", () => {
+		const out = render(
+			{ kind: "composite", segments: [{ type: "image", url: URL_A, mime: "image/gif" }] },
+			{ images: new Map([[URL_A, { data: PNG, mime: undefined }]]) },
+		);
+		assert.ok(out.includes("data:image/gif;base64,"), out);
+		assert.ok(!out.includes("base64://"));
+	});
+
+	/** `forward-images` 的图**帧里就没有 mime 这一格** —— 两头都没有时也得兜一个出来。 */
+	it("帧里也没声明 mime → 兜底也得给一个,仍旧不落 base64://", () => {
+		const out = render(
+			{ kind: "forward-images", images: [{ url: URL_A }], forward: false },
+			{ images: new Map([[URL_A, { data: PNG, mime: undefined }]]) },
+		);
+		assert.ok(!out.includes("base64://"), "落到已废弃的 base64:// 了");
+		assert.ok(out.includes("data:application/octet-stream;base64,"), out);
+	});
 });
 
 describe("复合消息", () => {
