@@ -21,7 +21,7 @@
   },
   "scripts": {
     "test": "tsx --test 'src/**/*.test.ts'",
-    "typecheck": "tsc --noEmit --emitDeclarationOnly false"
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "tsx": "^4.23.12"

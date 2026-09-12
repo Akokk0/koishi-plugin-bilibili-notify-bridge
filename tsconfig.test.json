@@ -1,0 +1,15 @@
+{
+  "//": "构建那份(tsconfig.json)把 src/__tests__ 排在外面 —— 测试不该编进 lib。可 typecheck 也读那份的话,测试文件就一行都没被检查过:`as never` 的假夹具、对不上的签名全是静默的。这份只多做一件事:把测试也算进来,只查、不产出、不留 tsbuildinfo(那个文件没进 .gitignore)。",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "composite": false,
+    "incremental": false
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": []
+}
