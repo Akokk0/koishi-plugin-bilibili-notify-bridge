@@ -18,6 +18,7 @@ import { deliverSend } from "./deliver";
 import { fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
+import { shouldProbe } from "./probe";
 import type { BridgeCapabilityState, BridgeInboundSubscription } from "./protocol";
 import { VERSION } from "./version";
 
@@ -59,6 +60,8 @@ export function apply(ctx: Context, config: Config) {
 	 * (它是个 API 调用,失败带 retcode;@全体那些是消息元素,适配器静默丢弃,探不出)。
 	 */
 	const probed = new Map<string, BridgeCapabilityState>();
+	/** 手上那几发探还没回来。冷启动那几秒里三个口会挨个叫到同一个 bot。 */
+	const probing = new Set<string>();
 
 	/** onebot 的 `internal` 能调任意 action,失败抛 `SenderError` 并带 retcode。 */
 	function onebotInternalOf(bot: {
@@ -86,18 +89,29 @@ export function apply(ctx: Context, config: Config) {
 	}
 
 	/**
-	 * 空参探一次签卡口。探不出结论的什么都不记 —— 保持「还不知道」,下次上线再探。
+	 * 空参探一次签卡口。探不出结论的什么都不记 —— 下一个事件再探(见 `probe.ts`:冷启动
+	 * 那一发必然探不出来)。
 	 */
-	async function probeMiniApp(bot: { platform?: string; selfId?: string }): Promise<void> {
-		const call = onebotInternalOf(bot);
-		if (!call || !bot.selfId) return;
+	async function probeMiniApp(bot: {
+		platform?: string;
+		selfId?: string;
+		internal?: { _get?: (action: string, params?: unknown) => Promise<unknown> };
+	}): Promise<void> {
 		const botId = sidOf(bot);
+		if (!shouldProbe(bot, probed.get(botId), probing.has(botId))) return;
+		const call = onebotInternalOf(bot);
+		// ⚠️ adapter-onebot 要等自己那条 WS 连上才给 `internal._request`(断开时还会删掉)——
+		// 没有就等下一次 `login-updated`,别在这儿硬探一个必然失败的调用。
+		if (!call) return;
+		probing.add(botId);
 		try {
 			await call("get_mini_app_ark", {});
 			remember(botId, "supported");
 		} catch (err) {
 			const state = probeOf(err);
 			if (state !== "unknown") remember(botId, state);
+		} finally {
+			probing.delete(botId);
 		}
 	}
 
@@ -170,11 +184,16 @@ export function apply(ctx: Context, config: Config) {
 
 	ctx.on("login-added", (login) => {
 		pushBots();
-		// 上线就探一次:探之前那一格是「还不知道」,探完了名单会再推一次带上真答案。
 		void probeMiniApp(login.bot ?? {});
 	});
 	ctx.on("login-removed", () => pushBots());
-	ctx.on("login-updated", () => pushBots());
+	ctx.on("login-updated", (login) => {
+		pushBots();
+		// 🔴 探也挂在这儿,而且是**唯一真探得成的那一路**:satori 派 `login-added` 在
+		// `bot.start()` **之前**,那时 adapter-onebot 还没给出 `internal._request`。bot 真正
+		// 上线时派的是 `login-updated` —— 漏了它那一格永远停在「还不知道」(`probe.ts`)。
+		void probeMiniApp(login.bot ?? {});
+	});
 	// 插件后装、bot 已经在线的那一路 —— 事件不会补发。
 	for (const bot of ctx.bots) void probeMiniApp(bot);
 
