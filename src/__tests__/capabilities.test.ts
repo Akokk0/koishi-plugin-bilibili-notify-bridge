@@ -96,12 +96,10 @@ describe("其余五项:今天的答案与平台无关", () => {
 	 */
 	it("小程序卡:没探之前是「还不知道」,探完了可以盖上去", () => {
 		assert.equal(capabilitiesFor("onebot").miniAppCard, "unknown");
-		assert.equal(
-			capabilitiesFor("onebot", { miniAppCard: "supported" }).miniAppCard,
-			"supported",
-		);
+		assert.equal(capabilitiesFor("onebot", "supported").miniAppCard, "supported");
+		assert.equal(capabilitiesFor("onebot", "unsupported").miniAppCard, "unsupported");
 		// 盖的只是那一格,别的照旧。
-		assert.equal(capabilitiesFor("onebot", { miniAppCard: "supported" }).atAll, "supported");
+		assert.equal(capabilitiesFor("onebot", "supported").atAll, "supported");
 	});
 
 	/** 别的平台压根没有小程序卡这回事 —— 探都不用探。 */

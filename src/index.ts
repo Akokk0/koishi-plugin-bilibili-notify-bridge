@@ -18,15 +18,13 @@ import { deliverSend } from "./deliver";
 import { fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
-import type { BridgeCapabilityReport, BridgeInboundSubscription } from "./protocol";
+import type { BridgeCapabilityState, BridgeInboundSubscription } from "./protocol";
 import { VERSION } from "./version";
 
 export const name = "bilibili-notify-bridge";
 
 /** `ctx.http` 要声明才拿得到 —— 这条 WS 与取图都走它。 */
 export const inject = ["http"];
-
-export { VERSION } from "./version";
 
 /**
  * BN 还没说它要什么之前的那份订阅:**什么都不要**。握手前是它,断连之后也退回它 ——
@@ -60,7 +58,7 @@ export function apply(ctx: Context, config: Config) {
 	 * 探出来的能力,按 bot 记。今天只有一格:能不能签小程序卡 —— 六项里**唯一探得出来的**
 	 * (它是个 API 调用,失败带 retcode;@全体那些是消息元素,适配器静默丢弃,探不出)。
 	 */
-	const probed = new Map<string, Partial<BridgeCapabilityReport>>();
+	const probed = new Map<string, BridgeCapabilityState>();
 
 	/** onebot 的 `internal` 能调任意 action,失败抛 `SenderError` 并带 retcode。 */
 	function onebotInternalOf(bot: {
@@ -72,37 +70,49 @@ export function apply(ctx: Context, config: Config) {
 		return get ? (action, params) => get.call(bot.internal, action, params) : undefined;
 	}
 
-	/** 记一格探测结果;真变了才重推名单 —— 名单是全量快照,推空的只是白费带宽。 */
-	function remember(botId: string, patch: Partial<BridgeCapabilityReport>): void {
-		const before = probed.get(botId) ?? {};
-		if (before.miniAppCard === patch.miniAppCard) return;
-		probed.set(botId, { ...before, ...patch });
+	/**
+	 * 一个抛出来的错 → 签卡口那一格的证据。`1404`/`404` = 这个实现没有它;`1400`(参数错)
+	 * 或直接成功 = 它在;别的错(超时、限流)什么都证明不了。onebot 的 `SenderError` 把
+	 * retcode 放在 `code` 上。
+	 */
+	const probeOf = (err: unknown): BridgeCapabilityState =>
+		readMiniAppProbe({ retcode: (err as { code?: number }).code });
+
+	/** 记下探到的那一格;真变了才重推名单 —— 名单是全量快照,推一份一模一样的只是白费带宽。 */
+	function remember(botId: string, miniAppCard: BridgeCapabilityState): void {
+		if (probed.get(botId) === miniAppCard) return;
+		probed.set(botId, miniAppCard);
 		pushBots();
 	}
 
 	/**
-	 * 空参探一次签卡口。`1404`/`404` = 这个实现没有它;`1400`(参数错)或直接成功 = 它在;
-	 * 别的错(超时、限流)什么都证明不了 —— 保持「还不知道」,下次上线再探。
+	 * 空参探一次签卡口。探不出结论的什么都不记 —— 保持「还不知道」,下次上线再探。
 	 */
 	async function probeMiniApp(bot: { platform?: string; selfId?: string }): Promise<void> {
 		const call = onebotInternalOf(bot);
 		if (!call || !bot.selfId) return;
 		const botId = sidOf(bot);
-		let state: BridgeCapabilityReport["miniAppCard"];
 		try {
 			await call("get_mini_app_ark", {});
-			state = "supported";
+			remember(botId, "supported");
 		} catch (err) {
-			state = readMiniAppProbe({ retcode: (err as { code?: number }).code });
+			const state = probeOf(err);
+			if (state !== "unknown") remember(botId, state);
 		}
-		if (state !== "unknown") remember(botId, { miniAppCard: state });
 	}
 
-	/** bot 名单是**全量快照**:变了就整份重推。 */
-	const pushBots = () => client.pushBots(botsOf([...ctx.bots], (botId) => probed.get(botId)));
+	/** 报给 BN 的那份 bot 名单,**现取**:握手、重连、名单变了,拿的都是这一刻的。 */
+	const snapshot = () => botsOf([...ctx.bots], (botId) => probed.get(botId));
 
-	/** 按 `botId` 回查那个 bot —— 名单是我们自己报上去的,所以查不到通常意味着它刚掉线。 */
-	const botBySid = (botId: string) => ctx.bots.find((bot) => sidOf(bot) === botId);
+	/** bot 名单是**全量快照**:变了就整份重推。 */
+	const pushBots = () => client.pushBots(snapshot());
+
+	/**
+	 * 按 `botId` 回查那个 bot。`ctx.bots` 本身就是一张按 `sid`(= 我们的 `botId`)索引的表,
+	 * 用 koishi 自己那套查,省得我们再手拼一遍 id —— 拼歪了的症状是「配好的推送目标忽然
+	 * 发不出去」。查不到通常意味着它刚掉线。
+	 */
+	const botBySid = (botId: string) => ctx.bots[botId];
 
 	const client = createBridgeClient({
 		url: config.url,
@@ -110,7 +120,7 @@ export function apply(ctx: Context, config: Config) {
 		open: () =>
 			ctx.http.ws(config.url, { headers: { Authorization: `Bearer ${config.token}` } }),
 		// 现取:重连时报的是**那一刻**的名单,不是插件启动时的。
-		bots: () => botsOf([...ctx.bots], (botId) => probed.get(botId)),
+		bots: snapshot,
 		version: VERSION,
 		// 「已连上」那一行由 client 打(它手里有 BN 的版本号),这里不再重复一遍。
 		onWelcome: (next) => {
@@ -140,12 +150,11 @@ export function apply(ctx: Context, config: Config) {
 					if (!call) return null;
 					try {
 						const data = arkToSegmentData(await call("get_mini_app_ark", arkRequestOf(card)));
-						if (data !== null) remember(botId, { miniAppCard: "supported" });
+						if (data !== null) remember(botId, "supported");
 						return data;
 					} catch (err) {
 						// 真发时收到 1404 也是一种证据 —— 把这个 bot 记成签不了,名单跟着更新。
-						const state = readMiniAppProbe({ retcode: (err as { code?: number }).code });
-						if (state === "unsupported") remember(botId, { miniAppCard: "unsupported" });
+						if (probeOf(err) === "unsupported") remember(botId, "unsupported");
 						log.warn(`签小程序卡失败:${(err as Error).message}`);
 						return null;
 					}

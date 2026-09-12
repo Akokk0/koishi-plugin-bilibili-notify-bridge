@@ -48,29 +48,13 @@ const FORWARD: Record<string, BridgeCapabilityState> = {
 	qq: "unsupported",
 };
 
-/**
- * 分享卡里的链接:桥自己解得动就成立 —— 只有 QQ 家有 json / xml 卡这回事。
- * 与 {@link MINI_APP} 不同,这一格**不用探**:解卡是我们自己做的事,不问对面。
- */
-const SHARE_CARD_LINKS: Record<string, BridgeCapabilityState> = {
-	onebot: "supported",
-};
-
-/**
- * 小程序卡:**只有 QQ 家有**(要向腾讯签 ark),别家压根没有这回事。
- *
- * 🔴 onebot 这一格写成 `unknown` 是刻意的 —— 它是六项里**唯一探得出来的**
- * (`get_mini_app_ark` 是个 API 调用,失败带 retcode;而 @全体那些是消息元素,适配器
- * 碰到不认识的静默丢弃,连 try/catch 都探不出)。探之前如实说不知道,探完了由调用方盖上。
- */
-const MINI_APP: Record<string, BridgeCapabilityState> = {
-	onebot: "unknown",
-};
-
 export function capabilitiesFor(
 	platform: string,
-	/** 探出来的结果,盖在表上面。只盖给出来的那几格。 */
-	probed: Partial<BridgeCapabilityReport> = {},
+	/**
+	 * 探出来的那一格,盖在表上面。**只有小程序卡这一项**:六项里只有它探得出来,别的
+	 * 全是硬编的(见上面那段)。
+	 */
+	probedMiniAppCard?: BridgeCapabilityState,
 ): BridgeCapabilityReport {
 	// 🔴 **六格全写在这儿**,别退回「先整张填 unknown、再逐格盖」那种写法:那个循环填的值
 	// 一格都活不下来(下面每格都盖了),真正的代价是它**顶掉了编译器**—— 加第七项能力时
@@ -85,8 +69,15 @@ export function capabilitiesFor(
 		// BN 会在它那侧剥成干净纯文本。
 		markdown: "unsupported",
 		forward: FORWARD[platform] ?? "unknown",
-		shareCardLinks: SHARE_CARD_LINKS[platform] ?? "unsupported",
-		miniAppCard: MINI_APP[platform] ?? "unsupported",
+		// 分享卡里的链接:桥自己解得动就成立 —— 只有 QQ 家有 json / xml 卡这回事,不用问对面。
+		// ⚠️ `supported` 的前提是那个 OneBot 实现**上报数组格式的消息段**;退回字符串格式的
+		// CQ 码时,卡的 payload 在上报那一步就没了,我们解个空。
+		shareCardLinks: platform === "onebot" ? "supported" : "unsupported",
+		// 小程序卡:**只有 QQ 家有**(要向腾讯签 ark),别家压根没有这回事。
+		// 🔴 onebot 那一档没探之前是 `unknown` 而不是 `unsupported`,刻意的 —— 它是六项里
+		// **唯一探得出来的**(`get_mini_app_ark` 是个 API 调用,失败带 retcode;而 @全体那些
+		// 是消息元素,适配器碰到不认识的静默丢弃,连 try/catch 都探不出)。探之前如实说不知道。
+		miniAppCard: probedMiniAppCard ?? (platform === "onebot" ? "unknown" : "unsupported"),
 	};
-	return { ...report, ...probed };
+	return report;
 }

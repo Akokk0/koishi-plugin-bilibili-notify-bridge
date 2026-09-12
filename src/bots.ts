@@ -8,7 +8,7 @@
 
 import { capabilitiesFor } from "./capabilities";
 import { PLATFORM_ICONS } from "./platform-icons";
-import type { BridgeBotWire, BridgeCapabilityReport } from "./protocol";
+import type { BridgeBotWire, BridgeCapabilityState } from "./protocol";
 
 /**
  * 只依赖这几格 —— 写全 koishi 的 `Bot` 等于把整个框架的形状焊进 wire 层。
@@ -23,10 +23,15 @@ export interface KoishiBotLike {
 }
 
 /**
- * 探出来的能力,按 bot 查。**按 bot 而不是按平台** —— 同一台 koishi 上两个 QQ 号,
- * 一个接的实现签得了小程序卡、另一个签不了,这是真会发生的。
+ * 探出来的那一格(签不签得了小程序卡),按 bot 查;`undefined` = 还没探过。
+ *
+ * **按 bot 而不是按平台** —— 同一台 koishi 上两个 QQ 号,一个接的实现签得了小程序卡、
+ * 另一个签不了,这是真会发生的。
+ *
+ * 🔴 六项里**只有这一项探得出来**,所以这里就写死成一格:写成「一份能力表补丁」的话,
+ * 调用方递进来的别的格会被静默丢掉(报的和真发时按的就成了两回事)。
  */
-export type ProbedCapabilities = (botId: string) => Partial<BridgeCapabilityReport> | undefined;
+export type ProbedMiniAppCard = (botId: string) => BridgeCapabilityState | undefined;
 
 /**
  * `botId` —— koishi 自己也叫它 `sid`。平台 + 账号,一条连接内不会撞。
@@ -42,15 +47,16 @@ export function sidOf(bot: { platform?: string; selfId?: string }): string {
 
 export function botsOf(
 	bots: readonly KoishiBotLike[],
-	probed?: ProbedCapabilities,
+	probed?: ProbedMiniAppCard,
 ): BridgeBotWire[] {
 	return bots.flatMap((bot) => {
 		if (!bot.platform || !bot.selfId) return [];
+		const botId = sidOf(bot);
 		const wire: BridgeBotWire = {
-			botId: sidOf(bot),
+			botId,
 			platform: bot.platform,
 			selfId: bot.selfId,
-			capabilities: capabilitiesFor(bot.platform, probed?.(sidOf(bot))),
+			capabilities: capabilitiesFor(bot.platform, probed?.(botId)),
 		};
 		// 没有就不报这一格 —— 编一个「未命名」出来,面板上就再也分不出「没名字」和
 		// 「真的叫未命名」。

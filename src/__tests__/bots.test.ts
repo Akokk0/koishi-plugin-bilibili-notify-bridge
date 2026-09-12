@@ -7,18 +7,40 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { botsOf } from "../bots";
+import { type KoishiBotLike, botsOf, sidOf } from "../bots";
 
-/** 只摆 `botsOf` 真正读的那几格 —— 多摆一格就是在假设它读了不该读的东西。 */
-function bot(over: Record<string, unknown> = {}) {
+/**
+ * 只摆 `botsOf` 真正读的那几格 —— 多摆一格就是在假设它读了不该读的东西。
+ *
+ * `over` 收的是任意键:koishi 的 bot 上挂着一堆我们不该读的东西(`status` / `ctx` /
+ * `adapter` / `internal`),有几条用例正是要把它们摆上去,看会不会漏到 wire 上。
+ */
+function bot(over: Record<string, unknown> = {}): KoishiBotLike {
 	return {
 		platform: "discord",
 		selfId: "10086",
 		user: { name: "小电视" },
 		status: 1,
 		...over,
-	} as never;
+	} as KoishiBotLike;
 }
+
+describe("botId 的形状", () => {
+	/**
+	 * 🔴 **这条钉的是接线的契约。** `index.ts` 拿 koishi 自己那套查 bot(`ctx.bots[botId]`
+	 * 这张按 `sid` 索引的表、`session.sid`),而名单上那个 `botId` 是这儿拼的 —— 两边必须
+	 * 是**同一个串**。漂了的症状是「BN 那边配好的推送目标忽然发不出去」,而两侧各自的测试
+	 * 都还是绿的。
+	 */
+	it("就是 koishi 的 sid:平台:账号", () => {
+		assert.equal(sidOf({ platform: "onebot", selfId: "10000" }), "onebot:10000");
+	});
+
+	/** 没登上的 bot(缺任一格)拼出来的东西不会跟任何真 id 相等 —— 调用方靠的就是这一点。 */
+	it("缺一格也拼得出来,只是谁都不等于它", () => {
+		assert.notEqual(sidOf({ platform: "onebot" }), sidOf({ platform: "onebot", selfId: "10000" }));
+	});
+});
 
 describe("名单", () => {
 	it("id 用 平台:账号 —— 一条连接内不会撞", () => {
@@ -67,7 +89,7 @@ describe("名单", () => {
 	it("探出来的能力盖到那个 bot 头上,别的 bot 不受影响", () => {
 		const list = botsOf(
 			[bot({ platform: "onebot", selfId: "1" }), bot({ platform: "onebot", selfId: "2" })],
-			(botId) => (botId === "onebot:1" ? { miniAppCard: "supported" } : undefined),
+			(botId) => (botId === "onebot:1" ? "supported" : undefined),
 		);
 		assert.equal(list[0]?.capabilities?.miniAppCard, "supported");
 		// 没探到的那个照旧是「还不知道」,不是「不支持」。
@@ -80,7 +102,7 @@ describe("名单", () => {
 	 * 还能把推送目标指到它身上。
 	 */
 	it("还没登上的 bot(没有平台 / 账号)不报 —— 不是报一个空的", () => {
-		const list = botsOf([bot(), { user: { name: "刚建的" } } as never, bot({ selfId: undefined })]);
+		const list = botsOf([bot(), { user: { name: "刚建的" } }, bot({ selfId: undefined })]);
 		assert.deepEqual(
 			list.map((b) => b.botId),
 			["discord:10086"],
