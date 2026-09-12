@@ -9,17 +9,8 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { arkRequestOf, arkToSegmentData, cardLinksOf, readMiniAppProbe } from "../onebot.ts";
-import { jsonElement, miniAppCardJson, structMsgCardJson } from "./cards";
-
-const CARD = {
-	kind: "miniapp-card",
-	title: "标题",
-	desc: "简介",
-	picUrl: "http://x/pic.png",
-	path: "pages/video/video?bvid=BV1",
-	jumpUrl: "https://www.bilibili.com/video/BV1",
-} as const;
+import { arkRequestOf, arkToSegmentData, cardLinksOf, readMiniAppProbe } from "../onebot";
+import { jsonElement, MINIAPP_CARD, miniAppCardJson, structMsgCardJson } from "./cards";
 
 describe("签卡请求", () => {
 	/**
@@ -27,7 +18,7 @@ describe("签卡请求", () => {
 	 * `webUrl` 才是网页链接(签回来落到卡的 `qqdocurl`)。照名字填的卡点开是「页面不存在」。
 	 */
 	it("jumpUrl 放小程序页面路径,webUrl 放网页链接", () => {
-		const req = arkRequestOf(CARD);
+		const req = arkRequestOf(MINIAPP_CARD);
 		assert.equal(req.jumpUrl, "pages/video/video?bvid=BV1");
 		assert.equal(req.webUrl, "https://www.bilibili.com/video/BV1");
 		assert.equal(req.type, "bili");

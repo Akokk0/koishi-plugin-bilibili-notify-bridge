@@ -8,8 +8,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { renderMessage } from "../message";
+import { MINIAPP_CARD, PNG } from "./cards";
 
-const PNG = Buffer.from("89504e470d0a1a0a", "hex");
 const URL_A = "http://192.168.1.5:8787/ext/bridge/blob/aaaa";
 const URL_B = "http://192.168.1.5:8787/ext/bridge/blob/bbbb";
 
@@ -126,14 +126,7 @@ describe("降级", () => {
 	 * 不是 `path` —— 那是小程序**页面路径**,贴到群里谁都点不开。
 	 */
 	it("小程序卡 → 文字,用网页链接不用小程序路径", () => {
-		const out = render({
-			kind: "miniapp-card",
-			title: "标题",
-			desc: "简介",
-			picUrl: "http://x/pic.png",
-			path: "pages/video/video?bvid=BV1",
-			jumpUrl: "https://www.bilibili.com/video/BV1",
-		});
+		const out = render(MINIAPP_CARD);
 		assert.ok(out.includes("标题"));
 		assert.ok(out.includes("https://www.bilibili.com/video/BV1"));
 		assert.ok(!out.includes("pages/video/video"), "把小程序页面路径贴出去了,点不开");

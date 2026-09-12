@@ -9,8 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { capabilitiesFor } from "../capabilities";
 import { deliverSend } from "../deliver";
-
-const PNG = Buffer.from("89504e470d0a1a0a", "hex");
+import { MINIAPP_CARD, PNG } from "./cards";
 
 function frame(over: Record<string, unknown> = {}) {
 	return {
@@ -86,14 +85,7 @@ describe("发出去了", () => {
 });
 
 describe("小程序卡", () => {
-	const card = {
-		kind: "miniapp-card",
-		title: "标题",
-		desc: "简介",
-		picUrl: "http://x/pic.png",
-		path: "pages/video/video?bvid=BV1",
-		jumpUrl: "https://www.bilibili.com/video/BV1",
-	} as const;
+	const card = MINIAPP_CARD;
 
 	it("签得下来就发一张真卡(json 段)", async () => {
 		const d = deps({ signMiniApp: async () => '{"app":"com.tencent.miniapp_01"}' });
