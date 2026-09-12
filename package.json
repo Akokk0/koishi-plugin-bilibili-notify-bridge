@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-bilibili-notify-bridge",
-  "description": "把这台 koishi 里已经配好的 bot 借给 bilibili-notify 用",
+  "description": "把这台 koishi 里已经配好的 bot 借给 bilibili-notify 用 —— 它监听 B 站 UP 主的动态 / 直播，渲染成卡片图片推送出去：https://github.com/Akokk0/bilibili-notify",
   "version": "0.0.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
@@ -24,7 +24,7 @@
   },
   "koishi": {
     "description": {
-      "zh": "把这台 koishi 里已经配好的 bot 借给 bilibili-notify 用"
+      "zh": "把这台 koishi 里已经配好的 bot 借给 [bilibili-notify](https://github.com/Akokk0/bilibili-notify) 用 —— 它监听 B 站 UP 主的动态 / 直播，渲染成卡片图片推送出去。"
     },
     "service": {
       "required": [

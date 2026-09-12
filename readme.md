@@ -4,6 +4,9 @@
 
 把这台 koishi 里**已经配好的 bot 借给 [bilibili-notify](https://github.com/Akokk0/bilibili-notify) 用**。
 
+[bilibili-notify](https://github.com/Akokk0/bilibili-notify)（下称 BN）是个独立跑的 B 站订阅推送程序：
+监听 UP 主的动态与直播，渲染成卡片图片推送出去，自带 Web 控制台，发 Docker 镜像与 macOS / Windows 桌面应用。
+
 BN 负责订阅 UP 主、渲染卡片、决定什么时候推；这个插件只负责把消息交给你的 bot 发出去，
 再把用户在群里贴的链接回传给 BN 解析。于是 telegram / discord / kook 这些平台不用 BN 各写一份适配 ——
 koishi 早就有人写好了。
