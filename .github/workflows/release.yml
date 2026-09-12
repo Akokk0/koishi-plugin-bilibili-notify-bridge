@@ -1,0 +1,51 @@
+name: Release
+
+# 打 `v<版本>` tag 就发 npm。
+#
+# 版本号**不由 workflow 改写**:package.json 的 version 与 src/version.ts 的 VERSION 由一条
+# 测试钉成一致(报给 BN 的就是后者),tag 只是「把这份代码发出去」的扳机 —— 三者对不上就停,
+# 不发一个自报家门与 npm 上不一致的包。
+#
+# 需要仓库 secret `NPM_TOKEN`(npm 的 automation token,要 Publish 权限)。provenance 还要求
+# package.json 的 repository.url 指向这个 GitHub 仓。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance 要它来换 OIDC 凭据
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Tag must match package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag 与 package.json 的 $pkg 对不上 —— 先改 package.json 与 src/version.ts,再打 tag"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      # 上面已经把门禁跑完了,prepublishOnly 是留给本机手发那一路的保险,这里不必再跑一遍。
+      - run: npm publish --provenance --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

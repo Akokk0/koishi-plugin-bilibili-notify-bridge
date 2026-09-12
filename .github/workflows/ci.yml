@@ -1,0 +1,32 @@
+name: CI
+
+# 门禁:typecheck(含测试文件)→ test → build。push 与 PR 同一份。
+#
+# 这个仓平时嵌在一个 koishi 工作区里开发,依赖由外层的 node_modules 兜底 —— 这里是唯一一处
+# **干净安装**:package.json 里少声明了什么,只有这儿会红。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # .node-version 钉的是**构建机**的 Node(tsdown 要 ≥22.18,node --test 的 glob 要 ≥22)。
+      # 发出去的包能跑在多低的 Node 上,由 package.json 的 engines 与 tsdown 的 target 说了算。
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # build 也在门禁里:lib/ 不入库,发出去的就是这一步的产物,坏了要在打 tag 之前知道。
+      - run: npm run build
