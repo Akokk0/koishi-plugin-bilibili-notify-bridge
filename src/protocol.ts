@@ -134,3 +134,10 @@ export type BridgeToServerFrame =
  * ⚠️ **4007(这条接入被停用了)与其余一切都要退避重连** —— 用户把开关拨回来就该自己回去。
  */
 export const BRIDGE_TERMINAL_CLOSE_CODES: readonly number[] = [4001, 4002, 4003, 4004, 4005, 4006];
+
+/**
+ * 上面那几档里**赖我们自己**的两档:4003 我们发了形状不对的帧、4004 连上了却没按时 hello。
+ * 跟用户填的那些东西一点关系没有 —— 报成「配置那头的事」只会让人去翻一份没毛病的配置,
+ * 而真正该发生的是他把这行日志贴成一个 issue。紧挨着上面那张表放,漂了一眼就看得见。
+ */
+export const BRIDGE_PLUGIN_BUG_CLOSE_CODES: readonly number[] = [4003, 4004];

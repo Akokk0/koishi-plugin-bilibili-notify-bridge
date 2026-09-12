@@ -11,6 +11,7 @@
  */
 
 import {
+	BRIDGE_PLUGIN_BUG_CLOSE_CODES,
 	BRIDGE_PROTOCOL_VERSION,
 	BRIDGE_TERMINAL_CLOSE_CODES,
 	type BridgeBotWire,
@@ -18,6 +19,7 @@ import {
 	type BridgeInboundSubscription,
 	type BridgeSendFrame,
 	type BridgeToServerFrame,
+	type ServerToBridgeFrame,
 } from "./protocol";
 
 /** koishi 的 `ctx.http.ws()` 回的就是这个形状(DOM 那一套)。 */
@@ -40,6 +42,12 @@ export interface BridgeClientOptions {
 	deliver(frame: BridgeSendFrame): Promise<{ ok: boolean; err?: string }>;
 	/** BN 说它要什么入站消息。每次握手都会重新下发。 */
 	onWelcome(subscription: BridgeInboundSubscription): void;
+	/**
+	 * 这条 socket 没了(断开 / 被看门狗踢掉),**一条连接只叫一次**。收摊不叫 —— 那是我们
+	 * 自己走的,宿主整个都在拆。宿主拿它把上一条连接的入站订阅收回去:不收的话下一次握手
+	 * 之前,群里的消息还照着一份作废的订阅往外驮。
+	 */
+	onDisconnect?(): void;
 	log: { info(message: string): void; warn(message: string): void };
 	/** 第 n 次重连等多久。默认 0.5s 起翻倍、封顶 30s。 */
 	backoff?(attempt: number): number;
@@ -63,7 +71,7 @@ export interface BridgeClient {
 const REFUSED = /Unexpected server response:\s*(\d{3})/;
 
 /** 从 error 事件里把**人能看懂的那句话**捞出来。吞掉它等于让人对着连不上的 BN 猜。 */
-export function reasonOf(event: unknown): string {
+function reasonOf(event: unknown): string {
 	const ev = event as { message?: unknown; error?: { message?: unknown } } | undefined;
 	const message = typeof ev?.message === "string" ? ev.message : undefined;
 	const inner = typeof ev?.error?.message === "string" ? ev.error.message : undefined;
@@ -79,11 +87,11 @@ export function reasonOf(event: unknown): string {
  * 🔴 这一档**照 close code 判不出来**:upgrade 被拒时 close code 是 1006,和网线松了长得
  * 一模一样。漏了它的症状是「token 填错 → koishi 永远捶 BN」,而屏幕上什么有用的都没有。
  */
-export function shouldReconnectAfterHttp(status: number): boolean {
+function shouldReconnectAfterHttp(status: number): boolean {
 	return status !== 401;
 }
 
-export function bridgeBackoffMs(attempt: number): number {
+function bridgeBackoffMs(attempt: number): number {
 	return Math.min(30_000, 500 * 2 ** Math.max(0, attempt));
 }
 
@@ -112,6 +120,14 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	let refusedBy: number | undefined;
 	/** 眼下排着的那只看门狗。收到任何帧就撤了重排 —— 一次只该有一只。 */
 	let cancelWatchdog: (() => void) | undefined;
+	/**
+	 * 这条连接上**最后真发出去过**的那份名单(序列化后的样子)。
+	 *
+	 * 🔴 koishi 的 `login-updated` 每一次状态翻转都响,而 bot 的线上形状里**没有状态那一格** ——
+	 * 一个连不上的 bot 抖一分钟,就是十几份一模一样的 KB 级帧。名单是全量快照,一样的那份
+	 * 再推一遍一个字的新消息都没有。
+	 */
+	let sentBots: string | undefined;
 
 	/**
 	 * 重新计时。**收到任何帧都叫一次** —— 判据是「听见过」,不是「回过 pong」。
@@ -147,12 +163,25 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		} catch {
 			// 已经没了
 		}
+		// 这一路也是「连丢了」—— 对宿主来说和收到一个 close 没有区别。
+		opts.onDisconnect?.();
 		retry("静默超时");
 	}
 
+	/**
+	 * 往**指定的**那条 socket 上写一帧。序列化只此一处 —— 手抄的第二处迟早跟这儿说的不是
+	 * 一回事(比如哪天要加个长度上限、或者换成压缩帧)。
+	 *
+	 * 收 socket 而不是读闭包里那个:hello 与 pong 都只该写在「触发它的那条」连接上。
+	 */
+	function write(target: SocketLike, frame: BridgeToServerFrame): void {
+		target.send(JSON.stringify(frame));
+	}
+
+	/** 过一道「连着且握过手」的闸再写。业务帧一律走这儿。 */
 	function send(frame: BridgeToServerFrame): boolean {
 		if (!socket || !shook) return false;
-		socket.send(JSON.stringify(frame));
+		write(socket, frame);
 		return true;
 	}
 
@@ -182,27 +211,26 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		);
 	}
 
-	function onFrame(frame: Record<string, unknown>): void {
+	function onFrame(target: SocketLike, frame: ServerToBridgeFrame): void {
 		switch (frame.type) {
 			case "welcome": {
 				shook = true;
 				// 握完手才算连通,退避从头数 —— 按「socket 开了」算的话,一个连上就被踢的
 				// 循环会一直用最短那档去捶 BN。
 				attempt = 0;
-				const server = frame.server as { version?: string } | undefined;
-				opts.log.info(`已连上 bilibili-notify v${server?.version ?? "?"}`);
-				opts.onWelcome(frame.inbound as BridgeInboundSubscription);
+				opts.log.info(`已连上 bilibili-notify v${frame.server?.version ?? "?"}`);
+				opts.onWelcome(frame.inbound);
 				break;
 			}
 			case "ping":
+				// 绕开 `send()` 那道握手闸:ping 是 BN 在问「你还在吗」,而「还没 welcome」
+				// 恰恰是最该老实回一声的时候 —— 咽下去只会被当成死了。
 				// id 原样抄回去。1.3 起 BN 每一发 ping 都带它(心跳那些也带)—— 不抄的话
 				// 面板那颗「测试」配不上这一趟,只会如实超时。
-				socket?.send(
-					JSON.stringify(typeof frame.id === "string" ? { type: "pong", id: frame.id } : { type: "pong" }),
-				);
+				write(target, typeof frame.id === "string" ? { type: "pong", id: frame.id } : { type: "pong" });
 				break;
 			case "send":
-				void onSend(frame as unknown as BridgeSendFrame);
+				void onSend(frame);
 				break;
 			case "error":
 				opts.log.warn(`BN 报了个错:${String(frame.message)}`);
@@ -216,7 +244,23 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		scheduled = false;
 		shook = false;
 		refusedBy = undefined;
-		const next = opts.open();
+		// 新的一条连接什么都不知道,hello 自己会报全量名单 —— 去重的记忆跟着清空,不然
+		// 上一条连接上发过的那份会把这一条的第一次推送咽掉。
+		sentBots = undefined;
+		let next: SocketLike;
+		try {
+			next = opts.open();
+		} catch (err) {
+			/**
+			 * 🔴 地址少个 `ws://` 这种,`ctx.http.ws` 是**当场抛**(`Invalid URL`),不是回一条
+			 * 连不上的 socket。不接住的话:这一轮没有 socket、`scheduled` 又刚被清掉,没人再
+			 * 安排重连 —— 插件从此彻底不动;而且从重连定时器里抛出去的那一发没人接得住。
+			 */
+			socket = undefined;
+			opts.log.warn(`连不上 ${opts.url}:${reasonOf(err)}`);
+			retry("开连接就抛了");
+			return;
+		}
 		socket = next;
 		// 连上之后 BN 迟迟不说话也算死 —— 「开着但一直没 welcome」与「半路被掐断」是同一种坏。
 		armWatchdog();
@@ -227,33 +271,47 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		const mine = (): boolean => socket === next;
 		next.addEventListener("open", () => {
 			if (!mine()) return;
-			// hello 是第一帧,而它自己不经过 `send()`(那道闸要求已握手)。
-			next.send(
-				JSON.stringify({
-					type: "hello",
-					protocol: { ...BRIDGE_PROTOCOL_VERSION },
-					bridge: { kind: "koishi", name: "koishi", version: opts.version },
-					bots: opts.bots(),
-				}),
-			);
+			// hello 是第一帧,所以它**故意**不走 `send()` —— 那道闸要求已握手,而握手正是
+			// 这一帧要去换来的。写在 `next` 上而不是闭包里那个:意思是「这条连接的开场白」。
+			write(next, {
+				type: "hello",
+				protocol: { ...BRIDGE_PROTOCOL_VERSION },
+				bridge: { kind: "koishi", name: "koishi", version: opts.version },
+				bots: opts.bots(),
+			});
 		});
 		next.addEventListener("message", (ev: { data?: unknown }) => {
-			if (!mine()) return;
+			/**
+			 * 🔴 收摊之后还会落进来帧(关闭握手那几十毫秒)。`disposed` 不挡的话:`armWatchdog()`
+			 * 是往 koishi 一只已经失效的 scope 上排定时器(`ctx.setTimeout` 直接抛
+			 * `INACTIVE_EFFECT`),而那一帧 `send` 还会被真投递出去 —— 插件都卸载了还在发消息。
+			 */
+			if (disposed || !mine()) return;
 			// 听见了就重新计时 —— 认不认得这一帧不重要,它说话了就算活着。
 			armWatchdog();
-			let frame: Record<string, unknown>;
+			let frame: unknown;
 			try {
-				frame = JSON.parse(String(ev?.data ?? "")) as Record<string, unknown>;
+				frame = JSON.parse(String(ev?.data ?? ""));
 			} catch {
 				opts.log.warn("BN 发来一帧不是 JSON 的东西,忽略");
 				return;
 			}
-			onFrame(frame);
+			// `null` 与 `123` 都是合法 JSON,但都不是帧。不挡的话下一步读 `.type` 当场抛在 ws
+			// 的回调里 —— 那儿没人接得住,整个 koishi 吃一发 uncaughtException。
+			if (typeof frame !== "object" || frame === null) {
+				opts.log.warn(`BN 发来的这一帧不是对象(${frame === null ? "null" : typeof frame}),忽略`);
+				return;
+			}
+			// 这一步是**唯一**的信任边界:线上下来的东西到此为止按帧看待,形状不对的照协议
+			// §11 忽略(而不是断连)。再往里就不用一路 `as` 了。
+			onFrame(next, frame as ServerToBridgeFrame);
 		});
 		next.addEventListener("close", (ev: { code?: number }) => {
 			if (!mine()) return;
 			clearWatchdog();
 			shook = false;
+			// 连丢了就叫一声 —— 重不重连是下面的事,订阅这会儿已经作废了。
+			opts.onDisconnect?.();
 			const code = ev?.code ?? 1006;
 			// upgrade 被拒那一路先判:那时 close code 是 1006,和网线松了分不出来。
 			if (refusedBy !== undefined && !shouldReconnectAfterHttp(refusedBy)) {
@@ -261,8 +319,13 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 				return;
 			}
 			if (BRIDGE_TERMINAL_CLOSE_CODES.includes(code)) {
-				// 再试一次也是同样的结果 —— 该把错显示给用户,而不是拿同样的 token 去捶 BN。
-				opts.log.warn(`BN 断开了这条连接(${code}):这是配置那头的事,不重连`);
+				// 再试一次也是同样的结果。但**赖谁**得分清:让人去翻一份没毛病的配置,
+				// 比不说还费时间 —— 这两档他该做的是把这行贴成一个 issue。
+				opts.log.warn(
+					BRIDGE_PLUGIN_BUG_CLOSE_CODES.includes(code)
+						? `BN 断开了这条连接(${code}):${code === 4003 ? "我们发的帧形状不对" : "我们没能按时握手"} —— 这是插件自己的 bug,烦请拿这行去提个 issue`
+						: `BN 断开了这条连接(${code}):这是配置那头的事,不重连`,
+				);
 				return;
 			}
 			retry(`断了(${code})`);
@@ -273,7 +336,9 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			const status = REFUSED.exec(reason)?.[1];
 			if (status) refusedBy = Number(status);
 			// 🔴 **把原因说出来**。这一句是主人手里唯一的线索:连不上时它就是全部。
-			opts.log.warn(`连不上 ${opts.url}:${reason}`);
+			// 握手前后是两回事:一条**跑着的**连接上报错还说「连不上 <地址>」,是把人往地址 /
+			// 防火墙那头带 —— 而那地址明明刚刚还通着,真正的原因在后半句里。
+			opts.log.warn(shook ? `连接出错:${reason}` : `连不上 ${opts.url}:${reason}`);
 		});
 	}
 
@@ -282,8 +347,11 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	return {
 		connected: () => shook,
 		pushBots(bots) {
-			// 没连上就不发 —— 名单是现取的,握手那一刻自然报的就是最新那份。
-			send({ type: "bots", bots });
+			const snapshot = JSON.stringify(bots);
+			if (snapshot === sentBots) return;
+			// 没连上就不发 —— 名单是现取的,握手那一刻自然报的就是最新那份。发成了才记:
+			// 没发出去的那次要是也记下,连上之后第一份真名单就被自己咽了。
+			if (send({ type: "bots", bots })) sentBots = snapshot;
 		},
 		pushInbound(botId, platform, message) {
 			// 协议不补发:推一条三小时前的消息比不推更糟。
@@ -294,8 +362,14 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			cancelRetry?.();
 			// 看门狗也得收摊,不然 koishi 卸载插件之后它还会醒一次。
 			clearWatchdog();
+			// **先摘再关**:`close()` 只是开了个关闭握手,socket 还要活几十毫秒。摘掉之后
+			// `connected()` 当场说实话,一条还在路上的投递回到 `send()` 时也不会再往这条
+			// 正在关的 socket 上写(`mine()` 同时失效 —— 那声 close 不会被当成「连丢了」)。
+			const dying = socket;
+			socket = undefined;
+			shook = false;
 			try {
-				socket?.close(1000, "plugin disposed");
+				dying?.close(1000, "plugin disposed");
 			} catch {
 				// 已经没了
 			}

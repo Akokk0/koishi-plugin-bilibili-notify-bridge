@@ -27,6 +27,12 @@ export const inject = ["http"];
 
 export { VERSION } from "./version";
 
+/**
+ * BN 还没说它要什么之前的那份订阅:**什么都不要**。握手前是它,断连之后也退回它 ——
+ * 连都没连着还照着上一次的订阅把每条群消息解一遍,白烧的是主人的 CPU。
+ */
+const NO_INBOUND: BridgeInboundSubscription = { private: false, group: "none" };
+
 export interface Config {
 	url: string;
 	token: string;
@@ -48,7 +54,7 @@ export function apply(ctx: Context, config: Config) {
 	 * BN 要什么入站消息 —— **握手前一条都不驮**。默认就该是「什么都不要」:连上之前把
 	 * 群消息传出去,等于在用户还没同意时就上传了他的聊天。
 	 */
-	let subscription: BridgeInboundSubscription = { private: false, group: "none" };
+	let subscription: BridgeInboundSubscription = NO_INBOUND;
 	/**
 	 * 探出来的能力,按 bot 记。今天只有一格:能不能签小程序卡 —— 六项里**唯一探得出来的**
 	 * (它是个 API 调用,失败带 retcode;@全体那些是消息元素,适配器静默丢弃,探不出)。
@@ -108,6 +114,14 @@ export function apply(ctx: Context, config: Config) {
 		// 「已连上」那一行由 client 打(它手里有 BN 的版本号),这里不再重复一遍。
 		onWelcome: (next) => {
 			subscription = next;
+		},
+		/**
+		 * 🔴 断了就**退回「什么都不要」**。订阅是 BN 在 `welcome` 里下发的,断线之后它不再
+		 * 代表任何人的意思 —— 留着的话每一条群消息照旧解一遍元素树,而解出来的东西没地方送
+		 * (协议不补发)。重连握手会重新下发。
+		 */
+		onDisconnect: () => {
+			subscription = NO_INBOUND;
 		},
 		deliver: (frame) =>
 			deliverSend(frame, {

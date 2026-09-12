@@ -34,6 +34,9 @@ class FakeSocket implements SocketLike {
 	last(type: string): Record<string, unknown> | undefined {
 		return [...this.sent].reverse().find((f) => f.type === type);
 	}
+	count(type: string): number {
+		return this.sent.filter((f) => f.type === type).length;
+	}
 }
 
 const SILENT = { info() {}, warn() {} };
@@ -43,6 +46,14 @@ const WELCOME = {
 	protocol: { major: 1, minor: 1 },
 	server: { version: "9.9.9" },
 	inbound: { private: true, group: "with-links" },
+};
+const SEND = {
+	type: "send",
+	id: "s-1",
+	botId: "discord:1",
+	platform: "discord",
+	target: { scope: "group", address: "g-1" },
+	message: { kind: "text", text: "开播啦" },
 };
 
 let sockets: FakeSocket[];
@@ -75,6 +86,15 @@ function client(over: Partial<Parameters<typeof createBridgeClient>[0]> = {}) {
 		...over,
 	});
 }
+
+/** 把 warn 说过的每一句记下来 —— 「失败的原因不许吞」那几条全靠对着它断言。 */
+function recording(): { said: string[]; log: { info(m: string): void; warn(m: string): void } } {
+	const said: string[] = [];
+	return { said, log: { info: () => {}, warn: (m: string) => said.push(m) } };
+}
+
+/** 让投递那条 async 链跑完。用 `setTimeout` 而不是 `setImmediate`:排在 promise 队列后面。 */
+const settle = () => new Promise((r) => setTimeout(r, 5));
 
 /** 排在最后的那个定时器 = 刚安排的重连。 */
 function fireTimer(): void {
@@ -119,6 +139,35 @@ describe("握手", () => {
 		connect({ onWelcome: (sub: unknown) => (got = sub) });
 		assert.deepEqual(got, { private: true, group: "with-links" });
 	});
+
+	/**
+	 * 🔴 地址填错(少个 `ws://`)时 `ctx.http.ws` **当场抛** `Invalid URL`。不接住的话:这一轮
+	 * 没有 socket、也没人安排重连,插件从此再不连了;而且这一抛是从重连定时器里出去的,
+	 * 没人接得住(uncaughtException)。
+	 */
+	it("开连接就抛 → 说出原因并照常退避重连,不就此装死", () => {
+		const { said, log } = recording();
+		let thrown = false;
+		client({
+			log,
+			open: () => {
+				if (!thrown) {
+					thrown = true;
+					throw new TypeError("Invalid URL");
+				}
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket;
+			},
+		});
+		assert.equal(timers.length, 1, "开连接抛了之后没人安排重连");
+		assert.ok(
+			said.some((line) => line.includes("Invalid URL")),
+			`只说了:${said.join(" | ")}`,
+		);
+		fireTimer();
+		assert.equal(sockets.length, 1, "没回去重连");
+	});
 });
 
 describe("活着", () => {
@@ -140,22 +189,34 @@ describe("活着", () => {
 		sockets[0]?.say({ type: "ping" });
 		assert.ok(sockets[0]?.last("pong"));
 	});
+
+	/**
+	 * 🔴 `null` 与 `123` 都是**合法 JSON**,但都不是帧。不挡的话读 `.type` 当场抛在 ws 的回调
+	 * 里 —— 那里没人接得住,整个 koishi 收一发 uncaughtException。
+	 */
+	it("是 JSON 但不是对象(null / 数字)→ 忽略,不炸也不投递", async () => {
+		let delivered = 0;
+		connect({
+			deliver: async () => {
+				delivered += 1;
+				return { ok: true };
+			},
+		});
+		sockets[0]?.say(null);
+		sockets[0]?.say(123);
+		await settle();
+		assert.equal(delivered, 0, "拿不是帧的东西去投递了");
+		// 还活着:下一帧照认。
+		sockets[0]?.say({ type: "ping" });
+		assert.ok(sockets[0]?.last("pong"), "被一帧垃圾打死了");
+	});
 });
 
 describe("投递", () => {
-	const SEND = {
-		type: "send",
-		id: "s-1",
-		botId: "discord:1",
-		platform: "discord",
-		target: { scope: "group", address: "g-1" },
-		message: { kind: "text", text: "开播啦" },
-	};
-
 	it("发成功 → 回执 ok", async () => {
 		connect();
 		sockets[0]?.say(SEND);
-		await new Promise((r) => setTimeout(r, 5));
+		await settle();
 		assert.deepEqual(sockets[0]?.last("result"), { type: "result", id: "s-1", ok: true });
 	});
 
@@ -164,7 +225,7 @@ describe("投递", () => {
 	it("发失败 → 回执带着那句理由,不是干等超时", async () => {
 		connect({ deliver: async () => ({ ok: false, err: "群被禁言了" }) });
 		sockets[0]?.say(SEND);
-		await new Promise((r) => setTimeout(r, 5));
+		await settle();
 		assert.deepEqual(sockets[0]?.last("result"), {
 			type: "result",
 			id: "s-1",
@@ -180,7 +241,7 @@ describe("投递", () => {
 			},
 		});
 		sockets[0]?.say(SEND);
-		await new Promise((r) => setTimeout(r, 5));
+		await settle();
 		const result = sockets[0]?.last("result");
 		assert.equal(result?.ok, false);
 		assert.match(String(result?.err), /掉线/);
@@ -202,6 +263,40 @@ describe("名单变了", () => {
 		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
 		assert.equal(sockets[0]?.sent.length, 0);
 	});
+
+	/**
+	 * 🔴 koishi 的 `login-updated` 每一次状态翻转都会响,而 bot 线上形状里**没有状态这一格** ——
+	 * 一个连不上的 bot 抖一分钟,就是十几份一模一样的 KB 级帧。名单是全量快照,一样的那份
+	 * 再推一遍什么也没多说。
+	 */
+	it("同一份名单推两次只发一次 —— 抖一抖不该刷屏", () => {
+		const c = connect();
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		assert.equal(sockets[0]?.count("bots"), 1);
+	});
+
+	it("名单真变了就发", () => {
+		const c = connect();
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		c.pushBots([
+			{ botId: "kook:2", platform: "kook" },
+			{ botId: "kook:3", platform: "kook" },
+		]);
+		assert.equal(sockets[0]?.count("bots"), 2);
+	});
+
+	/** 换了一条连接就得从头说一遍 —— 新的那头什么都不知道(hello 只报了握手那一刻的)。 */
+	it("重连之后同一份名单照发", () => {
+		const c = connect();
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		sockets[0]?.fire("close", { code: 1006 });
+		fireTimer();
+		sockets[1]?.fire("open");
+		sockets[1]?.say(WELCOME);
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		assert.equal(sockets[1]?.count("bots"), 1, "重连之后把名单咽下去了");
+	});
 });
 
 describe("断了之后", () => {
@@ -215,15 +310,34 @@ describe("断了之后", () => {
 	});
 
 	/** 这几档再试一次也是同样的结果,该把错显示给用户,而不是拿同样的 token 去捶 BN。 */
-	it("token 不对 / 协议不兼容 / 接入被删 → 就此打住", () => {
-		for (const code of [4001, 4002, 4005]) {
-			sockets = [];
-			timers = [];
+	for (const code of [4001, 4002, 4005, 4006]) {
+		it(`BN 拿 ${code} 断的 → 就此打住`, () => {
 			connect();
 			sockets[0]?.fire("close", { code });
 			assert.equal(timers.length, 0, `close ${code} 之后不该再重连`);
-		}
-	});
+		});
+	}
+
+	/**
+	 * 协议 §10:4003(我们发了形状不对的帧)与 4004(10 秒内没握手)是**插件自己的 bug**。
+	 * 跟用户的配置一点关系都没有 —— 把这两档说成「配置那头的事」,只会让人去翻一份没问题的配置。
+	 */
+	for (const code of [4003, 4004]) {
+		it(`BN 拿 ${code} 断的 → 说清楚这是插件的 bug,不是配置`, () => {
+			const { said, log } = recording();
+			connect({ log });
+			sockets[0]?.fire("close", { code });
+			assert.equal(timers.length, 0, `close ${code} 之后不该再重连`);
+			assert.ok(
+				said.some((line) => line.includes("插件")),
+				`没说这是插件的 bug:${said.join(" | ")}`,
+			);
+			assert.ok(
+				!said.some((line) => line.includes("配置")),
+				`把插件的 bug 说成了配置问题:${said.join(" | ")}`,
+			);
+		});
+	}
 
 	/** 4007 是「这条接入被停用了」—— 主人把开关拨回来,它就该自己回去。 */
 	it("接入被停用(4007)照样退避重连", () => {
@@ -238,8 +352,8 @@ describe("断了之后", () => {
 	 * 吞掉它等于让人对着一台连不上的 BN 猜半天。
 	 */
 	it("连不上时把真正的原因说出来,不是一句「连接出错」", () => {
-		const said: string[] = [];
-		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		const { said, log } = recording();
+		client({ log });
 		sockets[0]?.fire("error", { message: "connect ECONNREFUSED 127.0.0.1:8787" });
 		assert.ok(
 			said.some((line) => line.includes("ECONNREFUSED")),
@@ -248,10 +362,28 @@ describe("断了之后", () => {
 	});
 
 	it("原因藏在 error 字段里也捞得出来", () => {
-		const said: string[] = [];
-		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		const { said, log } = recording();
+		client({ log });
 		sockets[0]?.fire("error", { error: new Error("getaddrinfo ENOTFOUND nas") });
-		assert.ok(said.some((line) => line.includes("ENOTFOUND")), `只说了:${said.join(" | ")}`);
+		assert.ok(
+			said.some((line) => line.includes("ENOTFOUND")),
+			`只说了:${said.join(" | ")}`,
+		);
+	});
+
+	/** 握手完了之后再出错,说「连不上 <地址>」是把人往地址 / 防火墙那头带 —— 那地址明明通着。 */
+	it("已经连上之后报的错不说「连不上」,但原因照说", () => {
+		const { said, log } = recording();
+		connect({ log });
+		sockets[0]?.fire("error", { message: "read ECONNRESET" });
+		assert.ok(
+			said.some((line) => line.includes("ECONNRESET")),
+			`只说了:${said.join(" | ")}`,
+		);
+		assert.ok(
+			!said.some((line) => line.includes("连不上")),
+			`都连上了还说连不上:${said.join(" | ")}`,
+		);
 	});
 
 	/**
@@ -259,8 +391,8 @@ describe("断了之后", () => {
 	 * 照 close code 判的话 token 填错就会**永远捶 BN**,而屏幕上什么有用的都没有。
 	 */
 	it("token 不对(401)→ 就此打住,不去捶 BN", () => {
-		const said: string[] = [];
-		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
+		const { said, log } = recording();
+		client({ log });
 		sockets[0]?.fire("error", { message: "Unexpected server response: 401" });
 		sockets[0]?.fire("close", { code: 1006 });
 		assert.equal(timers.length, 0, "401 之后还在重连");
@@ -268,16 +400,14 @@ describe("断了之后", () => {
 	});
 
 	/** 404 = 这台 BN 上眼下没有桥在跑;503 = 这条接入停用了。都是拨一下就好,该重连。 */
-	it("404 / 503 照样退避重连", () => {
-		for (const status of [404, 503]) {
-			sockets = [];
-			timers = [];
-			client({ log: { info: () => {}, warn: () => {} } });
+	for (const status of [404, 503]) {
+		it(`upgrade 被 ${status} 拒了 → 照样退避重连`, () => {
+			client();
 			sockets[0]?.fire("error", { message: `Unexpected server response: ${status}` });
 			sockets[0]?.fire("close", { code: 1006 });
 			assert.equal(timers.length, 1, `${status} 之后该重连`);
-		}
-	});
+		});
+	}
 
 	/**
 	 * 🔴 **「连着」不等于「通着」**。NAT / 家宽 / 休眠的路由器会把一条闲着的 TCP 静默掐断:
@@ -316,10 +446,8 @@ describe("断了之后", () => {
 
 	/** 「失败的原因不许吞」:这一断和网线松了长得一样,不说清楚没人查得出来。 */
 	it("被看门狗踢掉时说清楚是为什么", () => {
-		const said: string[] = [];
-		client({ log: { info: () => {}, warn: (m: string) => said.push(m) } });
-		sockets[0]?.fire("open");
-		sockets[0]?.say(WELCOME);
+		const { said, log } = recording();
+		connect({ log });
 		watchdog()?.fn();
 		assert.ok(
 			said.some((line) => line.includes("90000") || line.includes("没说过话")),
@@ -327,6 +455,35 @@ describe("断了之后", () => {
 		);
 	});
 
+	/**
+	 * 宿主那头记着 BN 下发的入站订阅。连断了订阅就作废 —— 不叫一声的话它会照着上一条连接的
+	 * 订阅继续往一条没了的路上驮群消息。
+	 */
+	it("断了叫一声 onDisconnect", () => {
+		let lost = 0;
+		connect({ onDisconnect: () => (lost += 1) });
+		sockets[0]?.fire("close", { code: 1006 });
+		assert.equal(lost, 1);
+	});
+
+	it("被看门狗踢掉也算断", () => {
+		let lost = 0;
+		connect({ onDisconnect: () => (lost += 1) });
+		watchdog()?.fn();
+		assert.equal(lost, 1, "静默超时那一路没叫");
+	});
+
+	/** 收摊是我们自己走的,不是「连丢了」—— 那时宿主整个都在拆,再回调一次只会添乱。 */
+	it("收摊不叫 onDisconnect", () => {
+		let lost = 0;
+		const c = connect({ onDisconnect: () => (lost += 1) });
+		c.dispose();
+		sockets[0]?.fire("close", { code: 1000 });
+		assert.equal(lost, 0);
+	});
+});
+
+describe("收摊", () => {
 	/** 看门狗自己排的定时器也得收摊,不然 koishi 卸载插件之后它还会醒一次。 */
 	it("收摊之后看门狗也撤了", () => {
 		const c = connect();
@@ -340,5 +497,33 @@ describe("断了之后", () => {
 		c.dispose();
 		sockets[0]?.fire("close", { code: 1006 });
 		assert.equal(timers.length, 0);
+	});
+
+	/**
+	 * 🔴 关闭握手那几十毫秒里还会落进来帧。这时 `armWatchdog()` 是往 koishi 一只已经失效的
+	 * scope 上排定时器(`ctx.setTimeout` 抛 `INACTIVE_EFFECT`),而那一帧 `send` 还会被真的
+	 * 投递出去 —— 插件都卸载了,它还在往群里发。
+	 */
+	it("收摊之后落进来的帧:不重排看门狗,也不投递", async () => {
+		let delivered = 0;
+		const c = connect({
+			deliver: async () => {
+				delivered += 1;
+				return { ok: true };
+			},
+		});
+		c.dispose();
+		sockets[0]?.say(SEND);
+		await settle();
+		assert.equal(watchdog(), undefined, "收摊之后又排了一只狗");
+		assert.equal(delivered, 0, "收摊之后还把帧投递出去了");
+	});
+
+	/** `connected()` 是宿主判断「现在能不能推」的唯一依据,收摊之后它必须当场说实话。 */
+	it("收摊之后 connected() 不再说自己连着", () => {
+		const c = connect();
+		assert.equal(c.connected(), true);
+		c.dispose();
+		assert.equal(c.connected(), false);
 	});
 });
