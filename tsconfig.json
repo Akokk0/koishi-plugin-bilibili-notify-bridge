@@ -1,27 +1,17 @@
 {
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "lib",
     "target": "es2022",
     "module": "esnext",
-    "declaration": true,
-    "emitDeclarationOnly": true,
-    "composite": true,
-    "incremental": true,
+    "moduleResolution": "bundler",
+    // 只做检查,产物由 tsdown 出(.d.ts 也是它出)。于是 `src/__tests__` 不用再排除 ——
+    // 排除它的唯一理由是「别编进 lib」,而打包器只从 src/index.ts 那棵树走,根本够不着测试。
+    // 从前那份排除的代价是:`typecheck` 读的也是它,测试文件一行都没被检查过。
+    "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "jsxImportSource": "@satorijs/element",
-    "types": [
-      "node",
-      "yml-register/types"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src"
-  ],
-  "exclude": [
-    "src/__tests__"
-  ]
+  "include": ["src"]
 }
