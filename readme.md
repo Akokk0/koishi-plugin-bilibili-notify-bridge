@@ -59,32 +59,23 @@ markdown，报支持只会让群里收到一堆星号）。
 
 ## 开发
 
+这个仓平时嵌在一个 koishi 工作区（`external/` 底下）里开发，依赖由外层的 node_modules 提供，
+koishi 在 dev 模式下按 tsconfig 的 paths 直接加载 `src/` —— **别在这个目录里单独装依赖**：
+插件目录里再出现一份 `koishi`，运行时插件 import 到的就是自己那份而不是宿主的，`Context` 对不上号，
+装上去当场认不出。干净安装只发生在 CI 与下面这种单独 clone 出来的场景：
+
 ```bash
-vp run test        # tsx --test，纯逻辑那几块
-vp run typecheck
+npm ci              # peerDependencies（koishi / @satorijs/element）npm 会自己一并装上
+npm run typecheck   # tsc，连测试文件一起查
+npm test            # node:test，经 tsx
+npm run build       # tsdown → lib/index.js（CJS）+ lib/index.d.ts；lib/ 不入库
 ```
 
 `src/index.ts` 是接线（跑在 koishi 运行时上，没有单元测试）；协议、能力表、消息投影、入站过滤、
 长连接各自在 `src/__tests__/` 里有测试。协议规范见 BN 仓里的 `extensions/bridge/PROTOCOL.md`。
 
-> ⚠️ **真机还没验过。** 这一版对着 BN 的协议写完、单测全绿，但还没有真的连上一台 BN 推过一条消息。
+Node 版本钉在 `.node-version`（22）：tsdown 要 ≥22.18，`node --test` 的 glob 也要 ≥22。
+**那是构建机的要求，不是用户的** —— 发出去的包按 `engines` 支持到 Node 18，打包 target 也是它。
 
-## 开发
-
-这个仓平时嵌在一个 koishi 工作区(`external/` 底下)里开发,依赖由外层的 node_modules 提供,
-koishi 在 dev 模式下按 tsconfig 的 paths 直接加载 `src/` —— **别在这个目录里单独装依赖**:
-插件目录里再出现一份 `koishi`,运行时插件 import 到的就是自己那份而不是宿主的,`Context` 对不上号,
-装上去当场认不出。干净安装只发生在 CI 与下面这种单独 clone 出来的场景:
-
-```bash
-npm ci          # peerDependencies(koishi / @satorijs/element)npm 会自己一并装上
-npm run typecheck   # tsc,连测试文件一起查
-npm test            # node:test,经 tsx
-npm run build       # tsdown → lib/index.js(CJS)+ lib/index.d.ts;lib/ 不入库
-```
-
-Node 版本钉在 `.node-version`(22):tsdown 要 ≥22.18,`node --test` 的 glob 也要 ≥22。
-**那是构建机的要求,不是用户的** —— 发出去的包按 `engines` 支持到 Node 18,打包 target 也是它。
-
-发版:改 `package.json` 与 `src/version.ts` 里的版本号(有测试钉着两者一致),提交后打
-`v<版本>` tag,GitHub Actions 跑完门禁就发到 npm。
+发版：改 `package.json` 与 `src/version.ts` 里的版本号（有测试钉着两者一致），提交后打
+`v<版本>` tag，GitHub Actions 跑完门禁就发到 npm。
