@@ -15,6 +15,7 @@ import { botsOf, sidOf } from "./bots";
 import { capabilitiesFor } from "./capabilities";
 import { createBridgeClient } from "./client";
 import { deliverSend } from "./deliver";
+import { fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
 import type { BridgeCapabilityReport, BridgeInboundSubscription } from "./protocol";
@@ -149,12 +150,9 @@ export function apply(ctx: Context, config: Config) {
 						return null;
 					}
 				},
-				async fetchImage(url) {
-					// 🔴 图必须**桥自己下载**(协议 §9):那条 URL 只保证桥自己可达,BN 常跑在
-					// NAS 上,交给平台去拉是静默失败。
-					const file = await ctx.http.file(url);
-					return { data: new Uint8Array(file.data), mime: file.type };
-				},
+				// 🔴 图必须**桥自己下载**(协议 §9):那条 URL 只保证桥自己可达,BN 常跑在
+				// NAS 上,交给平台去拉是静默失败。
+				fetchImage: (url) => fetchImage(ctx.http, url),
 			}),
 		log: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
 		later: (fn, ms) => ctx.setTimeout(fn, ms),
