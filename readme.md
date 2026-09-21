@@ -1,6 +1,13 @@
-# koishi-plugin-bilibili-notify-bridge
+<h1 align="center">
+  <img src="./assets/logo-squircle.png" width="160" />
+  <br>
+  Bilibili Notify 桥接
+  <br>
+</h1>
 
-[![npm](https://img.shields.io/npm/v/koishi-plugin-bilibili-notify-bridge?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-bilibili-notify-bridge)
+<p align="center">
+  <a href="https://www.npmjs.com/package/koishi-plugin-bilibili-notify-bridge"><img src="https://img.shields.io/npm/v/koishi-plugin-bilibili-notify-bridge?style=flat-square" alt="npm" /></a>
+</p>
 
 把这台 koishi 里**已经配好的 bot 借给 [bilibili-notify](https://github.com/Akokk0/bilibili-notify) 用**。
 
