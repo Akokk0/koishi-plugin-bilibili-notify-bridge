@@ -19,6 +19,21 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fetchImage, IMAGE_FETCH_TIMEOUT_MS, MAX_IMAGE_BYTES } from "../fetch-image";
 
+const PNG_HEAD = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** 一段响应体:开头是 `head`,后面补零到 `size` 字节(默认 32 —— 够认魔数)。 */
+function body(head: number[] | string, size = 32): ArrayBuffer {
+	const bytes = typeof head === "string" ? new TextEncoder().encode(head) : Uint8Array.from(head);
+	const out = new Uint8Array(Math.max(size, bytes.length));
+	out.set(bytes);
+	return out.buffer;
+}
+
+/** ISO-BMFF 的开头:盒长 4 字节 + `ftyp` + 品牌。 */
+function ftyp(brand: string): string {
+	return `\0\0\0\x18ftyp${brand}`;
+}
+
 /**
  * `ctx.http` 的替身:它本身能直接调(`ctx.http(url, config)`),身上也挂着 `file()`。两条口
  * 都记账 —— 「走的是哪条口、带了什么配置」正是要钉的东西。
@@ -26,7 +41,7 @@ import { fetchImage, IMAGE_FETCH_TIMEOUT_MS, MAX_IMAGE_BYTES } from "../fetch-im
 function fakeHttp(over: { data?: ArrayBuffer; type?: string | null } = {}) {
 	const calls: Array<{ via: "request" | "file"; url: string; config: Record<string, unknown> }> = [];
 	const type = "type" in over ? over.type : "image/png";
-	const data = over.data ?? new ArrayBuffer(8);
+	const data = over.data ?? body(PNG_HEAD);
 	const headers = new Headers(type ? { "content-type": type } : {});
 	const request = async (url: string, config: Record<string, unknown>) => {
 		calls.push({ via: "request", url, config });
@@ -74,7 +89,7 @@ describe("只取 http / https", () => {
 		const h = fakeHttp();
 		const out = await fetchImage(h.http, "https://bn.example/ext/bridge/blob/aaaa");
 		assert.equal(out.mime, "image/png");
-		assert.equal(out.data.byteLength, 8);
+		assert.equal(out.data.byteLength, 32);
 		assert.ok(out.data instanceof Uint8Array);
 	});
 });
@@ -111,7 +126,7 @@ describe("不走代理", () => {
 
 describe("上限", () => {
 	it("超了上限就抛,并说清多大、上限多少", async () => {
-		const h = fakeHttp({ data: new ArrayBuffer(MAX_IMAGE_BYTES + 1) });
+		const h = fakeHttp({ data: body(PNG_HEAD, MAX_IMAGE_BYTES + 1) });
 		await assert.rejects(
 			() => fetchImage(h.http, "http://bn/ext/bridge/blob/big"),
 			(err: Error) => {
@@ -123,20 +138,86 @@ describe("上限", () => {
 	});
 
 	it("正好卡在上限上放行", async () => {
-		const h = fakeHttp({ data: new ArrayBuffer(MAX_IMAGE_BYTES) });
+		const h = fakeHttp({ data: body(PNG_HEAD, MAX_IMAGE_BYTES) });
 		const out = await fetchImage(h.http, "http://bn/ext/bridge/blob/edge");
 		assert.equal(out.data.byteLength, MAX_IMAGE_BYTES);
 	});
 });
 
-describe("mime", () => {
-	/**
-	 * 对头没给 Content-Type 时**回 undefined,别回 null**:渲染那一层拿 `??` 去接帧里声明的
-	 * 那个 mime,`null` 会把兜底整条跳过 —— 然后 `h.image(data, null)` 发出去的是已废弃的
-	 * `base64://`。
-	 */
-	it("对头什么都没说 → undefined,不是 null 也不是空串", async () => {
-		assert.equal((await fetchImage(fakeHttp({ type: null }).http, "http://bn/x")).mime, undefined);
-		assert.equal((await fetchImage(fakeHttp({ type: "" }).http, "http://bn/x")).mime, undefined);
+/**
+ * 🔴 **2xx 不等于拿到了图。** BN 挂在一层要登录的反代后面时,取图口回的是一张 200 的登录页;
+ * 照单全收就是群里一张裂图、回执还是 ok。Content-Type 明说不是图的直接拒;字节再按魔数认一遍,
+ * 认不出的也拒 —— Content-Type 挡得住老实的登录页,挡不住一张标着 `image/png` 的错误页。
+ */
+describe("取回来的得真是图", () => {
+	it("Content-Type 明说不是图 → 拒,并说出它是什么", async () => {
+		const h = fakeHttp({ type: "text/html; charset=utf-8" });
+		await assert.rejects(() => fetchImage(h.http, "http://bn/x"), /text\/html/);
 	});
+
+	/** 🔴 拒的时候别把字节倒进报错:它会原样进 BN 的推送历史,登录页里可能正带着东西。 */
+	it("标着 image/png、字节却不是图 → 拒,而且报错里没有那些字节", async () => {
+		const page = "<html><body>请先登录 secret-token-abc</body></html>";
+		const h = fakeHttp({ type: "image/png", data: body(page) });
+		await assert.rejects(
+			() => fetchImage(h.http, "http://bn/x"),
+			(err: Error) => {
+				assert.match(err.message, /不像图片/);
+				assert.ok(!err.message.includes("secret"), `把字节倒进报错了:${err.message}`);
+				assert.ok(!err.message.includes("<html"), `把字节倒进报错了:${err.message}`);
+				return true;
+			},
+		);
+	});
+
+	it("短到连魔数都凑不齐 → 拒", async () => {
+		const h = fakeHttp({ type: "image/gif", data: new TextEncoder().encode("GIF").buffer });
+		await assert.rejects(() => fetchImage(h.http, "http://bn/x"), /不像图片/);
+	});
+
+	/** mp4 也是 `ftyp` 打头 —— 只看第 4..8 个字节等于把一段视频当成图放过去。 */
+	it("ISO-BMFF 但品牌不是图(mp4)→ 拒", async () => {
+		const h = fakeHttp({ type: null, data: body(ftyp("isom")) });
+		await assert.rejects(() => fetchImage(h.http, "http://bn/x"), /不像图片/);
+	});
+
+	/** 有的 CDN / 对象存储就是这么回图的:没标、或者标成通用的二进制,交给字节认。 */
+	for (const type of [null, "", "application/octet-stream"]) {
+		it(`Content-Type 是 ${JSON.stringify(type)} → 交给字节认`, async () => {
+			const out = await fetchImage(fakeHttp({ type, data: body(PNG_HEAD) }).http, "http://bn/x");
+			assert.equal(out.mime, "image/png");
+		});
+	}
+
+	/**
+	 * 🔴 **交给渲染层的 mime 是认出来的那个,不是对头说的。** 带参数的 content-type
+	 * (`image/png; charset=binary`)会让 onebot 的 `data:` 正则失配、整张图发不出去;对头
+	 * 标错了的(说 jpeg、其实是 png)照它发就是一张打不开的图。
+	 */
+	it("mime 是认出来的:不带参数、以字节为准", async () => {
+		const withParams = fakeHttp({ type: "image/png; charset=binary", data: body(PNG_HEAD) });
+		assert.equal((await fetchImage(withParams.http, "http://bn/x")).mime, "image/png");
+		const mislabelled = fakeHttp({ type: "image/jpeg", data: body(PNG_HEAD) });
+		assert.equal((await fetchImage(mislabelled.http, "http://bn/x")).mime, "image/png");
+		const shouting = fakeHttp({ type: "IMAGE/PNG", data: body(PNG_HEAD) });
+		assert.equal((await fetchImage(shouting.http, "http://bn/x")).mime, "image/png");
+	});
+
+	const KINDS: Array<[string, number[] | string, string]> = [
+		["PNG", PNG_HEAD, "image/png"],
+		["JPEG", [0xff, 0xd8, 0xff, 0xe0], "image/jpeg"],
+		["GIF87a", "GIF87a", "image/gif"],
+		["GIF89a", "GIF89a", "image/gif"],
+		["WEBP", "RIFF\0\0\0\0WEBPVP8 ", "image/webp"],
+		["BMP", "BM", "image/bmp"],
+		["AVIF", ftyp("avif"), "image/avif"],
+		["HEIC", ftyp("heic"), "image/heic"],
+		["HEIF", ftyp("mif1"), "image/heif"],
+	];
+	for (const [label, head, mime] of KINDS) {
+		it(`认得 ${label}`, async () => {
+			const out = await fetchImage(fakeHttp({ type: null, data: body(head) }).http, "http://bn/x");
+			assert.equal(out.mime, mime);
+		});
+	}
 });

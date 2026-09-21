@@ -15,7 +15,10 @@ import type { BridgeMessage, BridgeSegment } from "./protocol";
 
 export interface RenderedImage {
 	data: Uint8Array;
-	/** 取回来那一刻对头说的 Content-Type。**可能没有** —— 那就退回帧里声明的那一格。 */
+	/**
+	 * 取回来之后**按字节认出来**的类型(`fetch-image.ts` 的 `imageMimeOf`),不是对头说的那个。
+	 * 没有时退回帧里声明的那一格。
+	 */
 	mime?: string;
 }
 
