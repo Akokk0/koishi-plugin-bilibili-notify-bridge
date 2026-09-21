@@ -8,18 +8,22 @@
 
 import { capabilitiesFor } from "./capabilities";
 import { PLATFORM_ICONS } from "./platform-icons";
-import type { BridgeBotWire, BridgeCapabilityState } from "./protocol";
+import { type BridgeBotWire, type BridgeCapabilityState, idOf } from "./protocol";
 
 /**
  * 只依赖这几格 —— 写全 koishi 的 `Bot` 等于把整个框架的形状焊进 wire 层。
  *
  * ⚠️ `platform` / `selfId` 在 koishi 里**是可选的**(bot 刚建、还没登上时两格都空)。
  * 少了任一格的借不出去:`botId` 拼不出来,BN 那头的推送目标也就指不着它。
+ *
+ * 🔴 写成 `unknown` 是故意的:类型说是 `string`,可第三方适配器塞个数字的账号、一个不是
+ * 字符串的昵称进来 koishi 也照收。原样报上去,整帧 hello / bots 就是畸形帧(BN 那头这几格
+ * 都是 `z.string()`)→ close 4003 → 插件当终局永不重连。
  */
 export interface KoishiBotLike {
-	platform?: string;
-	selfId?: string;
-	user?: { name?: string };
+	platform?: unknown;
+	selfId?: unknown;
+	user?: { name?: unknown };
 }
 
 /**
@@ -50,19 +54,25 @@ export function botsOf(
 	probed?: ProbedMiniAppCard,
 ): BridgeBotWire[] {
 	return bots.flatMap((bot) => {
-		if (!bot.platform || !bot.selfId) return [];
-		const botId = sidOf(bot);
+		// 平台是个词表里的词,不是 id —— 只认非空字符串,不替它转。
+		const platform = typeof bot.platform === "string" && bot.platform !== "" ? bot.platform : undefined;
+		// 账号过的是和入站那头**同一道**归一(`idOf`):数字转成字符串,说不清的当没登上。
+		// 拼出来的 `botId` 与 koishi 自己的 `sid`(模板字符串拼的)是同一个串 —— 回查靠的就是它。
+		const selfId = idOf(bot.selfId);
+		if (platform === undefined || selfId === undefined) return [];
+		const botId = sidOf({ platform, selfId });
 		const wire: BridgeBotWire = {
 			botId,
-			platform: bot.platform,
-			selfId: bot.selfId,
-			capabilities: capabilitiesFor(bot.platform, probed?.(botId)),
+			platform,
+			selfId,
+			capabilities: capabilitiesFor(platform, probed?.(botId)),
 		};
 		// 没有就不报这一格 —— 编一个「未命名」出来,面板上就再也分不出「没名字」和
-		// 「真的叫未命名」。
-		if (bot.user?.name) wire.name = bot.user.name;
+		// 「真的叫未命名」。不是非空字符串的也不报(见 `KoishiBotLike`)。
+		const name = bot.user?.name;
+		if (typeof name === "string" && name !== "") wire.name = name;
 		// 平台图标同理:没有的不报,BN 那头退回平台名的头两个字母。
-		const icon = PLATFORM_ICONS[bot.platform];
+		const icon = PLATFORM_ICONS[platform];
 		if (icon) wire.icon = icon;
 		return [wire];
 	});

@@ -109,6 +109,39 @@ describe("名单", () => {
 		);
 	});
 
+	/**
+	 * 🔴 **可选的那几格也得是字符串。** BN 那头 `selfId` / `name` 是 `z.string().optional()`:
+	 * 第三方适配器给了个数字的账号、或者一个不是字符串的昵称,整帧 hello / bots 就是畸形帧 →
+	 * close 4003 → 插件当终局永不重连。一个 bot 的一格就能把整条桥打死。
+	 */
+	it("数字的账号转成字符串报,botId 与 koishi 的 sid 是同一个串", () => {
+		const [only] = botsOf([bot({ selfId: 10086 })]);
+		assert.equal(only?.selfId, "10086");
+		assert.equal(only?.botId, "discord:10086");
+	});
+
+	it("不是非空字符串的昵称不报这一格", () => {
+		for (const name of [42, "", true, { text: "小电视" }]) {
+			const [only] = botsOf([bot({ user: { name } })]);
+			assert.ok(only, `昵称是 ${JSON.stringify(name)} 的 bot 整个没报`);
+			assert.equal("name" in only, false, `昵称 ${JSON.stringify(name)} 被报上去了`);
+		}
+	});
+
+	/** 账号说不清(布尔、对象)的跟没登上的一样:`botId` 拼不出一个真 id,借不出去。 */
+	it("账号 / 平台不是 id 的 bot 不报", () => {
+		const list = botsOf([
+			bot({ selfId: true }),
+			bot({ selfId: { id: "1" } }),
+			bot({ platform: 42 }),
+			bot(),
+		]);
+		assert.deepEqual(
+			list.map((b) => b.botId),
+			["discord:10086"],
+		);
+	});
+
 	/** wire 上只该有协议列出来的那几格。koishi 的 ctx / adapter / internal 一个都不许漏。 */
 	it("只输出协议里那几格", () => {
 		const [only] = botsOf([bot({ ctx: {}, adapter: {}, internal: {} })]);
