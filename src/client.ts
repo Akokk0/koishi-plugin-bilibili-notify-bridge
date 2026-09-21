@@ -21,6 +21,7 @@ import {
 	type BridgeToServerFrame,
 	clipErr,
 	reasonOf,
+	SEND_RESULT_WINDOW_MS,
 	type ServerToBridgeFrame,
 } from "./protocol";
 
@@ -109,6 +110,37 @@ function resultErrOf(err: unknown): string {
 	return clipErr(typeof err === "string" && err.trim() !== "" ? err : NO_REASON);
 }
 
+/**
+ * 一个小信号量:计数 + 等待队列。`acquire()` 回 `true` = 拿到名额(用完必须 `release()`),
+ * 回 `false` = 排队时被 `drain()` 放掉了(没拿到,也不用还)。
+ */
+function createSlots(size: number): {
+	acquire(): Promise<boolean>;
+	release(): void;
+	drain(): void;
+} {
+	let free = size;
+	const waiting: Array<(granted: boolean) => void> = [];
+	return {
+		acquire() {
+			if (free > 0) {
+				free -= 1;
+				return Promise.resolve(true);
+			}
+			return new Promise((resolve) => waiting.push(resolve));
+		},
+		release() {
+			// 有人排着就把名额**直接转手**给他,不经过 `free` —— 否则中间插进来的新请求会插队。
+			const next = waiting.shift();
+			if (next) next(true);
+			else free += 1;
+		},
+		drain() {
+			for (const next of waiting.splice(0)) next(false);
+		},
+	};
+}
+
 function bridgeBackoffMs(attempt: number): number {
 	return Math.min(30_000, 500 * 2 ** Math.max(0, attempt));
 }
@@ -132,6 +164,13 @@ export const BRIDGE_SILENCE_LIMIT_MS = 90_000;
  * 照握手清零,这个循环就永远用 0.5 秒那档去捶 BN。
  */
 export const STABLE_SESSION_MS = 60_000;
+
+/**
+ * 同时在跑的投递最多几条,其余排队。每条都把要发的图整张读进内存(一张最多
+ * `MAX_IMAGE_BYTES`,交给适配器时还要再 base64 一遍),BN 一口气推几十条带图的 send 过来、
+ * 条条同时开跑的话,小机器上的 koishi 就被撑爆了。
+ */
+export const MAX_CONCURRENT_SENDS = 4;
 
 export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	const backoff = opts.backoff ?? bridgeBackoffMs;
@@ -157,6 +196,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	 * 再推一遍一个字的新消息都没有。
 	 */
 	let sentBots: string | undefined;
+	/** 投递名额。跨重连共用一个:封的是这台机器上的内存,不是某一条连接的。 */
+	const slots = createSlots(MAX_CONCURRENT_SENDS);
 
 	/**
 	 * 重新计时。**收到任何帧都叫一次** —— 判据是「听见过」,不是「回过 pong」。
@@ -227,13 +268,43 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		cancelRetry = opts.later(connect, wait);
 	}
 
-	async function onSend(frame: BridgeSendFrame): Promise<void> {
+	/**
+	 * 排队轮到的这条 `send`,BN 那边是不是已经判了失败。是就记一行、回 `true`:不投递、不回执。
+	 *
+	 * 🔴 判了失败的推送,主人可能已经人工重推了 —— 这时再发,同一条推送在群里出现两次。
+	 */
+	function gaveUpOn(target: SocketLike, frame: BridgeSendFrame, receivedAt: number): boolean {
+		if (disposed) return true;
+		if (socket !== target) {
+			opts.log.info(
+				`推送 ${frame.id} 排队时连接断过,不发了:断线那一刻 BN 已经把它判了失败(协议 §5.4),再发会和人工重推撞车`,
+			);
+			return true;
+		}
+		const waited = now() - receivedAt;
+		if (waited >= SEND_RESULT_WINDOW_MS) {
+			opts.log.info(
+				`推送 ${frame.id} 排队等了 ${waited}ms,不发了:BN 最多等 ${SEND_RESULT_WINDOW_MS}ms 回执,已经判它失败了,再发会和人工重推撞车`,
+			);
+			return true;
+		}
+		return false;
+	}
+
+	async function onSend(target: SocketLike, frame: BridgeSendFrame, receivedAt: number): Promise<void> {
+		// 排队。收摊时排着的全部被放掉 —— 放掉的直接跳过,不投递也不回执(连接都没了)。
+		if (!(await slots.acquire())) return;
 		let outcome: { ok: boolean; err?: string };
 		try {
+			if (gaveUpOn(target, frame, receivedAt)) return;
 			outcome = await opts.deliver(frame);
 		} catch (err) {
 			// 抛了也得回执 —— 见文件头那条。
 			outcome = { ok: false, err: reasonOf(err) };
+		} finally {
+			// 只把投递本身(读图进内存的那一段)关在名额里;回执写在外面。抛了也得还 ——
+			// 不然抛满四次,这条桥就再也不投递了。
+			slots.release();
 		}
 		// 走 `send()` 那道「连着且握过手才发」的闸 —— 投递要花时间(下图、签卡),回到这儿
 		// 时连接可能早没了。自己手写一遍那道判断,它迟早和 `send()` 说的不是一回事。
@@ -263,7 +334,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 				write(target, typeof frame.id === "string" ? { type: "pong", id: frame.id } : { type: "pong" });
 				break;
 			case "send":
-				void onSend(frame);
+				// 收到的时刻在这儿就记下:排队等名额的那段也算在 BN 的回执窗口里。
+				void onSend(target, frame, now());
 				break;
 			case "error":
 				opts.log.warn(`BN 报了个错:${String(frame.message)}`);
@@ -395,6 +467,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		dispose() {
 			disposed = true;
 			cancelRetry?.();
+			// 排着的投递全部放掉:插件都卸载了,它们不该再往群里发。
+			slots.drain();
 			// 看门狗也得收摊,不然 koishi 卸载插件之后它还会醒一次。
 			clearWatchdog();
 			// **先摘再关**:`close()` 只是开了个关闭握手,socket 还要活几十毫秒。摘掉之后

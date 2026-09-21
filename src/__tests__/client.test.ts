@@ -10,10 +10,11 @@ import { beforeEach, describe, it } from "node:test";
 import {
 	BRIDGE_SILENCE_LIMIT_MS,
 	createBridgeClient,
+	MAX_CONCURRENT_SENDS,
 	type SocketLike,
 	STABLE_SESSION_MS,
 } from "../client";
-import { BRIDGE_PROTOCOL_VERSION, MAX_ERR_CHARS } from "../protocol";
+import { BRIDGE_PROTOCOL_VERSION, MAX_ERR_CHARS, SEND_RESULT_WINDOW_MS } from "../protocol";
 
 class FakeSocket implements SocketLike {
 	sent: Record<string, unknown>[] = [];
@@ -333,6 +334,134 @@ describe("回执里的原因", () => {
 			throw new TypeError("");
 		});
 		assert.equal(err, "TypeError");
+	});
+});
+
+/**
+ * 同时在跑的投递有上限。每条都把要发的图整张读进内存(一张最多 16 MiB,交给适配器时还要再
+ * base64 一遍)—— BN 把一张卡推给三十个群,条条同时开跑,小机器上的 koishi 就被撑爆了。
+ */
+describe("投递名额", () => {
+	/** 每条投递都挂着,由测试决定什么时候放行。 */
+	function gated() {
+		const started: string[] = [];
+		const finish: Array<() => void> = [];
+		const deliver = (frame: { id: string }) =>
+			new Promise<{ ok: boolean }>((resolve) => {
+				started.push(frame.id);
+				finish.push(() => resolve({ ok: true }));
+			});
+		return { started, finish, deliver };
+	}
+
+	const sendOf = (n: number) => ({ ...SEND, id: `s-${n}` });
+
+	/** 把 info 也记下来 —— 「不发了」那一行是主人唯一能看见这条去向的地方。 */
+	function infoLog() {
+		const said: string[] = [];
+		return { said, log: { info: (m: string) => said.push(m), warn: () => {} } };
+	}
+
+	it(`同时最多 ${MAX_CONCURRENT_SENDS} 条在投,其余排队;放掉一条补上一条`, async () => {
+		const g = gated();
+		connect({ deliver: g.deliver });
+		for (let n = 0; n < MAX_CONCURRENT_SENDS + 2; n++) sockets[0]?.say(sendOf(n));
+		await settle();
+		assert.equal(g.started.length, MAX_CONCURRENT_SENDS, "名额没拦住");
+
+		g.finish[0]?.();
+		await settle();
+		assert.equal(g.started.length, MAX_CONCURRENT_SENDS + 1, "放掉一条之后排着的没补上");
+		// 回执写在名额外面,先放掉的那条已经回了。
+		assert.equal(sockets[0]?.count("result"), 1);
+
+		for (const go of g.finish.slice(1)) go();
+		await settle();
+		for (const go of g.finish.slice(MAX_CONCURRENT_SENDS + 1)) go();
+		await settle();
+		assert.equal(sockets[0]?.count("result"), MAX_CONCURRENT_SENDS + 2, "有的 send 没回执");
+	});
+
+	/** 投递抛了也得把名额还回来 —— 不然抛满四次,这条桥就再也不投递了。 */
+	it("投递抛了异常,名额照样还回来", async () => {
+		let calls = 0;
+		connect({
+			deliver: async () => {
+				calls += 1;
+				throw new Error("炸了");
+			},
+		});
+		for (let n = 0; n < MAX_CONCURRENT_SENDS * 2 + 1; n++) sockets[0]?.say(sendOf(n));
+		await settle();
+		assert.equal(calls, MAX_CONCURRENT_SENDS * 2 + 1, "抛过异常的投递把名额占死了");
+	});
+
+	/**
+	 * 🔴 排队期间连接断过:断线那一刻 BN 已经把在飞的全部判了失败(协议 §5.4),主人可能已经
+	 * 人工重推了 —— 这时再发,同一条推送在群里出现两次。
+	 */
+	it("排队期间连接换了 → 轮到时不投递、不回执,记一行", async () => {
+		const g = gated();
+		const { said, log } = infoLog();
+		connect({ deliver: g.deliver, log });
+		for (let n = 0; n < MAX_CONCURRENT_SENDS + 1; n++) sockets[0]?.say(sendOf(n));
+		await settle();
+
+		sockets[0]?.fire("close", { code: 1006 });
+		fireTimer();
+		sockets[1]?.fire("open");
+		sockets[1]?.say(WELCOME);
+
+		for (const go of g.finish) go();
+		await settle();
+		assert.ok(!g.started.includes(`s-${MAX_CONCURRENT_SENDS}`), "连接换过了还把排着的那条投出去了");
+		assert.ok(
+			![...(sockets[0]?.sent ?? []), ...(sockets[1]?.sent ?? [])].some(
+				(f) => f.type === "result" && f.id === `s-${MAX_CONCURRENT_SENDS}`,
+			),
+			"没投递的那条回了执",
+		);
+		assert.ok(
+			said.some((line) => line.includes(`s-${MAX_CONCURRENT_SENDS}`)),
+			`没说那条去哪了:${said.join(" | ")}`,
+		);
+	});
+
+	/** 排队等的那段也算在 BN 的回执窗口里:过了 30 秒它已经判失败了,再发就和人工重推撞车。 */
+	it(`排队超过 ${SEND_RESULT_WINDOW_MS}ms → 轮到时不投递、不回执,记一行`, async () => {
+		const g = gated();
+		const { said, log } = infoLog();
+		let clock = 0;
+		connect({ deliver: g.deliver, log, now: () => clock });
+		for (let n = 0; n < MAX_CONCURRENT_SENDS; n++) sockets[0]?.say(sendOf(n));
+		sockets[0]?.say(sendOf(98));
+		clock += SEND_RESULT_WINDOW_MS - 1;
+		sockets[0]?.say(sendOf(99));
+		await settle();
+
+		// 放掉一条:s-98 已经排满了窗口,不发;放掉第二条:s-99 还差一毫秒,照发。
+		clock += 1;
+		g.finish[0]?.();
+		await settle();
+		assert.ok(!g.started.includes("s-98"), "排过了回执窗口还投递了");
+		assert.ok(!sockets[0]?.sent.some((f) => f.type === "result" && f.id === "s-98"));
+		assert.ok(said.some((line) => line.includes("s-98")), `没说那条去哪了:${said.join(" | ")}`);
+
+		g.finish[1]?.();
+		await settle();
+		assert.ok(g.started.includes("s-99"), "没排满窗口的那条被错杀了");
+	});
+
+	/** 收摊了,排着的就不该再投 —— 插件都卸载了还在往群里发。 */
+	it("收摊时排队的全部放掉,不投递", async () => {
+		const g = gated();
+		const c = connect({ deliver: g.deliver });
+		for (let n = 0; n < MAX_CONCURRENT_SENDS + 2; n++) sockets[0]?.say(sendOf(n));
+		await settle();
+		c.dispose();
+		for (const go of g.finish) go();
+		await settle();
+		assert.equal(g.started.length, MAX_CONCURRENT_SENDS, "收摊之后排着的还是被投递了");
 	});
 });
 

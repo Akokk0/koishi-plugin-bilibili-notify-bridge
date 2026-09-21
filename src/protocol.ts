@@ -164,6 +164,12 @@ export const BRIDGE_TERMINAL_CLOSE_CODES: readonly number[] = [4001, 4002, 4003,
 export const BRIDGE_PLUGIN_BUG_CLOSE_CODES: readonly number[] = [4003, 4004];
 
 /**
+ * BN 等一条 `send` 的回执最多等多久,过了就按失败记账、不翻案(协议 §5.4;BN 那边是
+ * `DEFAULT_BRIDGE_SEND_TIMEOUT_MS`)。过了这个点还没开始投的,再发就是和人工重推撞车。
+ */
+export const SEND_RESULT_WINDOW_MS = 30_000;
+
+/**
  * 回执里 `err` 的长度上限(按字数)。BN 的单帧上限是 1 MiB(`MAX_BRIDGE_FRAME_BYTES`),超了
  * ws 直接关 1009 —— 一句异常原文(整页 HTML 的报错、一条 data: 地址)就能把整条桥打断线。
  */
