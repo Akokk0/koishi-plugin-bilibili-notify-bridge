@@ -19,7 +19,7 @@ import { fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
 import { shouldProbe } from "./probe";
-import type { BridgeCapabilityState, BridgeInboundSubscription } from "./protocol";
+import { type BridgeCapabilityState, type BridgeInboundSubscription, reasonOf } from "./protocol";
 import { VERSION } from "./version";
 
 export const name = "bilibili-notify-bridge";
@@ -169,7 +169,7 @@ export function apply(ctx: Context, config: Config) {
 					} catch (err) {
 						// 真发时收到 1404 也是一种证据 —— 把这个 bot 记成签不了,名单跟着更新。
 						if (probeOf(err) === "unsupported") remember(botId, "unsupported");
-						log.warn(`签小程序卡失败:${(err as Error).message}`);
+						log.warn(`签小程序卡失败:${reasonOf(err)}`);
 						return null;
 					}
 				},

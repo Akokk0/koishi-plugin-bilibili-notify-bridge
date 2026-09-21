@@ -162,3 +162,80 @@ export const BRIDGE_TERMINAL_CLOSE_CODES: readonly number[] = [4001, 4002, 4003,
  * 而真正该发生的是他把这行日志贴成一个 issue。紧挨着上面那张表放,漂了一眼就看得见。
  */
 export const BRIDGE_PLUGIN_BUG_CLOSE_CODES: readonly number[] = [4003, 4004];
+
+/**
+ * 回执里 `err` 的长度上限(按字数)。BN 的单帧上限是 1 MiB(`MAX_BRIDGE_FRAME_BYTES`),超了
+ * ws 直接关 1009 —— 一句异常原文(整页 HTML 的报错、一条 data: 地址)就能把整条桥打断线。
+ */
+export const MAX_ERR_CHARS = 1000;
+
+/**
+ * 把一句 `err` 截到 `MAX_ERR_CHARS` 字,并注明后面还有多少字(没超就原样)。
+ *
+ * 按**字**数(码点),不按 UTF-16 码元:截在一个 emoji 中间,回执里就是半个乱码。
+ *
+ * ⚠️ 不幂等:截过的再截一次,「后面还有 N 字」就成了截断注明自己的长度。所以**只在一处截** ——
+ * `client.ts` 拼 `result` 帧的那一行,投递回来的、抛出来的原因都走它。
+ */
+export function clipErr(text: string): string {
+	// 码元数 ≥ 码点数:码元都没超,码点更不会超 —— 常见的短原因不必拆一遍。
+	if (text.length <= MAX_ERR_CHARS) return text;
+	const chars = Array.from(text);
+	if (chars.length <= MAX_ERR_CHARS) return text;
+	return `${chars.slice(0, MAX_ERR_CHARS).join("")}…(后面还有 ${chars.length - MAX_ERR_CHARS} 字)`;
+}
+
+/**
+ * 原因里的 base64 图:`base64://…`(onebot 的写法)与 `data:…;base64,…`。
+ *
+ * 🔴 onebot 的 `SenderError` 把**整条消息参数**连同 base64 的图一起 `JSON.stringify` 进
+ * message —— 回执里就是几 MB 的 base64,截完也是一千个没人看得懂的字,真正有用的 retcode
+ * 被截在后面。整段换成一个短占位。
+ */
+const BASE64_BLOB = /base64:\/\/[A-Za-z0-9+/=_-]*|data:[^,\s"'<>]*?;base64,[A-Za-z0-9+/=_-]*/gi;
+const BASE64_PLACEHOLDER = "[base64 图片]";
+
+/** `.errors` 往里翻几层。satori 的 `AggregateError` 只有一层,再深的是在绕圈。 */
+const MAX_REASON_DEPTH = 3;
+
+/** 一个异常自己说的那句话(不含 base64 清洗,不含兜底)。 */
+function rawReasonOf(err: unknown, depth: number): string {
+	if (typeof err === "string") return err;
+	if (typeof err !== "object" || err === null) return err === undefined ? "" : String(err);
+	const message = (err as { message?: unknown }).message;
+	const own = typeof message === "string" ? message : "";
+	// 🔴 satori 发送失败抛的是**它自己的** `AggregateError`(不是全局那个,`instanceof` 认不出),
+	// 它自己的 message 恒为空串,真正的原因在 `.errors` 里 —— 所以按形状认。
+	const errors = (err as { errors?: unknown }).errors;
+	if (!Array.isArray(errors) || errors.length === 0 || depth >= MAX_REASON_DEPTH) return own;
+	const inner = errors
+		.map((item) => rawReasonOf(item, depth + 1).trim())
+		.filter((text) => text !== "")
+		.join(";");
+	if (inner === "") return own;
+	return own.trim() === "" ? inner : `${own}:${inner}`;
+}
+
+/** 说不出原话时,至少说出它是什么异常。 */
+function typeNameOf(err: unknown): string {
+	if (typeof err === "object" && err !== null) {
+		const name = (err as { name?: unknown }).name;
+		if (typeof name === "string" && name !== "") return name;
+		const ctor = (err as { constructor?: { name?: unknown } }).constructor?.name;
+		if (typeof ctor === "string" && ctor !== "") return ctor;
+	}
+	return err === null ? "null" : typeof err;
+}
+
+/**
+ * 一个抛出来的东西 → 回执 / 日志里的那句人话。
+ *
+ * 异常的原话(本身就是给人看的那句,比如平台回的报错);带 `.errors` 的把每一条都说出来;
+ * 里头的 base64 图整段换成占位;都没有就报它是什么异常 —— 空串回给 BN,主人看到的是一条
+ * 没有理由的失败。**不截长短**:截在出口(`clipErr`),只截一次。
+ */
+export function reasonOf(err: unknown): string {
+	const text = rawReasonOf(err, 0).replace(BASE64_BLOB, BASE64_PLACEHOLDER).trim();
+	return text === "" ? typeNameOf(err) : text;
+}
+

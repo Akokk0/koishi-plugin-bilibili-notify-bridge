@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { BRIDGE_SILENCE_LIMIT_MS, createBridgeClient, type SocketLike } from "../client";
-import { BRIDGE_PROTOCOL_VERSION } from "../protocol";
+import { BRIDGE_PROTOCOL_VERSION, MAX_ERR_CHARS } from "../protocol";
 
 class FakeSocket implements SocketLike {
 	sent: Record<string, unknown>[] = [];
@@ -245,6 +245,89 @@ describe("投递", () => {
 		const result = sockets[0]?.last("result");
 		assert.equal(result?.ok, false);
 		assert.match(String(result?.err), /掉线/);
+	});
+});
+
+/**
+ * 回执里那句原因(`err`)。它会原样出现在 BN 的推送历史里,是主人手里唯一的线索 ——
+ * 所以两头都不能出事:太长了把桥打断线,空了等于什么都没说。
+ */
+describe("回执里的原因", () => {
+	/** 拿一条 `send` 过去,回来那条回执的 `err`。 */
+	async function errOf(deliver: Parameters<typeof client>[0]["deliver"]): Promise<unknown> {
+		connect({ deliver });
+		sockets[0]?.say(SEND);
+		await settle();
+		const result = sockets[0]?.last("result");
+		assert.equal(result?.ok, false, "该是一条失败的回执");
+		return result?.err;
+	}
+
+	/**
+	 * 🔴 BN 的单帧上限是 1 MiB,超了 ws 直接关 1009 —— 一句异常原文(整页 HTML 的报错、一条
+	 * data: 地址)就能把整条桥打断线。**只在出口截一次**:截两次的话「后面还有 N 字」就成了
+	 * 截断注明自己的长度。
+	 */
+	it("投递回来的原因太长 → 截到上限,并注明后面还有多少字", async () => {
+		const err = await errOf(async () => ({ ok: false, err: "嗯".repeat(5000) }));
+		assert.equal(err, `${"嗯".repeat(MAX_ERR_CHARS)}…(后面还有 4000 字)`);
+	});
+
+	it("投递自己抛出来的原因太长 → 同一个出口,照样截", async () => {
+		const err = await errOf(async () => {
+			throw new Error("啊".repeat(5000));
+		});
+		assert.equal(err, `${"啊".repeat(MAX_ERR_CHARS)}…(后面还有 4000 字)`);
+	});
+
+	/**
+	 * 🔴 satori 发送失败抛的是它自己的 `AggregateError`,**它自己的 message 恒为空串**,真正的
+	 * 原因在 `.errors` 里。只读 `.message` 的话,主人在推送历史里看到的是一条没有理由的失败。
+	 */
+	it("satori 的 AggregateError(message 是空串)→ 把 .errors 里每一条的原因说出来", async () => {
+		// 照 `@satorijs/core` 的原样:自己的类、不是全局那个 AggregateError。
+		class AggregateError extends Error {
+			constructor(public errors: Error[]) {
+				super("");
+			}
+		}
+		const err = await errOf(async () => {
+			throw new AggregateError([new Error("群被禁言了"), new Error("消息太长")]);
+		});
+		assert.match(String(err), /群被禁言了/);
+		assert.match(String(err), /消息太长/);
+	});
+
+	/**
+	 * 🔴 onebot 的 `SenderError` 把**整条消息参数**连同 base64 的图一起 stringify 进 message ——
+	 * 回执里就是几 MB 的 base64,截完也是一千个没人看得懂的字,真正的 retcode 被截在后面。
+	 */
+	it("原因里的 base64 图整段换成一个短占位", async () => {
+		const blob = "iVBORw0KGgo".repeat(400);
+		const err = String(
+			await errOf(async () => {
+				throw new Error(
+					`Error with request send_group_msg, args: {"message":[{"type":"image","data":{"file":"base64://${blob}"}},{"type":"image","data":{"file":"data:image/png;base64,${blob}"}}]}, retcode: 1200`,
+				);
+			}),
+		);
+		assert.ok(!err.includes("iVBORw0KGgo"), `base64 还在:${err.slice(0, 200)}`);
+		assert.match(err, /\[base64 图片\]/);
+		assert.match(err, /retcode: 1200/, "真正有用的那半句被吞了");
+	});
+
+	/** 空串 = 没说原因。`??` 拦不住空串 —— 回执里一个空的 err,等于告诉主人「失败了,不知道为什么」却连这句都不说。 */
+	it("投递回来的原因是空串 → 回兜底那句,不是一个空的 err", async () => {
+		const err = await errOf(async () => ({ ok: false, err: "" }));
+		assert.equal(typeof err, "string");
+		assert.match(String(err), /发不出去/);
+	});
+
+	it("抛出来的异常没有原话 → 至少说出它是什么异常", async () => {
+		const err = await errOf(async () => {
+			throw new TypeError("");
+		});
+		assert.equal(err, "TypeError");
 	});
 });
 

@@ -8,7 +8,7 @@
 
 import h from "@satorijs/element";
 import { imageUrlsIn, renderMessage, type RenderedImage } from "./message";
-import type { BridgeCapabilityReport, BridgeSendFrame } from "./protocol";
+import { type BridgeCapabilityReport, type BridgeSendFrame, reasonOf } from "./protocol";
 
 /** koishi 的 `Bot` 上我们真用到的那几格。 */
 export interface SendableBot {
@@ -69,13 +69,13 @@ export async function deliverSend(
 					return [url, await deps.fetchImage(url)] as const;
 				} catch (err) {
 					// 取不到就**别发**。发一条缺了图的推送,主人只会以为是 BN 出图坏了。
-					throw new Error(`取图失败(${(err as Error).message}):${url}`);
+					throw new Error(`取图失败(${reasonOf(err)}):${url}`);
 				}
 			}),
 		);
 		for (const [url, image] of fetched) images.set(url, image);
 	} catch (err) {
-		return { ok: false, err: (err as Error).message };
+		return { ok: false, err: reasonOf(err) };
 	}
 
 	try {
@@ -96,7 +96,8 @@ export async function deliverSend(
 		await sendTo(bot, frame, content);
 		return { ok: true };
 	} catch (err) {
-		return { ok: false, err: (err as Error).message };
+		// 原因**不在这儿截**:回执的出口(`client.ts`)统一截一次。
+		return { ok: false, err: reasonOf(err) };
 	}
 }
 

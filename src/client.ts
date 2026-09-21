@@ -19,6 +19,8 @@ import {
 	type BridgeInboundSubscription,
 	type BridgeSendFrame,
 	type BridgeToServerFrame,
+	clipErr,
+	reasonOf,
 	type ServerToBridgeFrame,
 } from "./protocol";
 
@@ -71,7 +73,7 @@ export interface BridgeClient {
 const REFUSED = /Unexpected server response:\s*(\d{3})/;
 
 /** 从 error 事件里把**人能看懂的那句话**捞出来。吞掉它等于让人对着连不上的 BN 猜。 */
-function reasonOf(event: unknown): string {
+function eventReasonOf(event: unknown): string {
 	const ev = event as { message?: unknown; error?: { message?: unknown } } | undefined;
 	const message = typeof ev?.message === "string" ? ev.message : undefined;
 	const inner = typeof ev?.error?.message === "string" ? ev.error.message : undefined;
@@ -89,6 +91,20 @@ function reasonOf(event: unknown): string {
  */
 function shouldReconnectAfterHttp(status: number): boolean {
 	return status !== 401;
+}
+
+/** 投递那头没说为什么时回的那句。 */
+const NO_REASON = "发不出去(投递那头没说为什么)";
+
+/**
+ * 回执里的那句原因 —— **只在这儿截一次**(`clipErr` 不幂等),投递回来的、抛出来的都走它:
+ * 一句异常原文就能撑爆 BN 的单帧上限、把桥打断线。
+ *
+ * 🔴 空串当「没说原因」:`??` 拦不住空串,回执里一个空的 `err` 等于连「不知道为什么」都没说。
+ * 不是字符串的也一样 —— BN 那头 `err` 是 `string | 缺省`,回个别的就是畸形帧 → 4003。
+ */
+function resultErrOf(err: unknown): string {
+	return clipErr(typeof err === "string" && err.trim() !== "" ? err : NO_REASON);
 }
 
 function bridgeBackoffMs(attempt: number): number {
@@ -200,14 +216,14 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			outcome = await opts.deliver(frame);
 		} catch (err) {
 			// 抛了也得回执 —— 见文件头那条。
-			outcome = { ok: false, err: (err as Error).message };
+			outcome = { ok: false, err: reasonOf(err) };
 		}
 		// 走 `send()` 那道「连着且握过手才发」的闸 —— 投递要花时间(下图、签卡),回到这儿
 		// 时连接可能早没了。自己手写一遍那道判断,它迟早和 `send()` 说的不是一回事。
 		send(
 			outcome.ok
 				? { type: "result", id: frame.id, ok: true }
-				: { type: "result", id: frame.id, ok: false, err: outcome.err ?? "发不出去" },
+				: { type: "result", id: frame.id, ok: false, err: resultErrOf(outcome.err) },
 		);
 	}
 
@@ -257,7 +273,7 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			 * 安排重连 —— 插件从此彻底不动;而且从重连定时器里抛出去的那一发没人接得住。
 			 */
 			socket = undefined;
-			opts.log.warn(`连不上 ${opts.url}:${reasonOf(err)}`);
+			opts.log.warn(`连不上 ${opts.url}:${eventReasonOf(err)}`);
 			retry("开连接就抛了");
 			return;
 		}
@@ -332,7 +348,7 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		});
 		next.addEventListener("error", (ev: never) => {
 			if (!mine()) return;
-			const reason = reasonOf(ev);
+			const reason = eventReasonOf(ev);
 			const status = REFUSED.exec(reason)?.[1];
 			if (status) refusedBy = Number(status);
 			// 🔴 **把原因说出来**。这一句是主人手里唯一的线索:连不上时它就是全部。

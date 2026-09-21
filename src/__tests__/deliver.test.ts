@@ -259,6 +259,43 @@ describe("发不出去", () => {
 	});
 
 	/**
+	 * 🔴 satori 的发送失败抛的是它**自己的** `AggregateError`,message 恒为空串 —— 原因全在
+	 * `.errors` 里。只读 `.message` 的话,回执里是一条没有理由的失败。
+	 */
+	it("平台抛 satori 的 AggregateError → 把 .errors 里的原因说出来", async () => {
+		class AggregateError extends Error {
+			constructor(public errors: Error[]) {
+				super("");
+			}
+		}
+		const d = deps({
+			botOf: () => ({
+				sendMessage: async () => {
+					throw new AggregateError([new Error("Missing Permissions")]);
+				},
+			}),
+		});
+		const out = await deliverSend(frame(), d.deps);
+		assert.equal(out.ok, false);
+		assert.match(String(out.err), /Missing Permissions/);
+	});
+
+	/** 取图那条路也一样:原因里拼进去的是 `reasonOf` 说的那句,不是一个空括号。 */
+	it("取图抛了一个没有原话的异常 → 至少说出它是什么异常", async () => {
+		const d = deps({
+			fetchImage: async () => {
+				throw new TypeError("");
+			},
+		});
+		const out = await deliverSend(
+			frame({ message: { kind: "image", url: "http://bn/blob/x", mime: "image/png" } }),
+			d.deps,
+		);
+		assert.equal(out.ok, false);
+		assert.match(String(out.err), /取图失败\(TypeError\)/);
+	});
+
+	/**
 	 * 🔴 判「这个平台有没有私聊」不能看 `sendPrivateMessage` —— satori 的 `Bot` 基类
 	 * **永远**定义它,那道闸是死代码,一次都不会拦下什么。真正缺的是它内部要调的
 	 * `createDirectChannel`,所以没有私聊的平台抛的是 `this.createDirectChannel is not a
