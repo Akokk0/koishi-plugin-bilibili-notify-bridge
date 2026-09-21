@@ -86,3 +86,7 @@ Node 版本钉在 `.node-version`（22）：tsdown 要 ≥22.18，`node --test` 
 
 发版：改 `package.json` 与 `src/version.ts` 里的版本号（有测试钉着两者一致），提交后打
 `v<版本>` tag，GitHub Actions 跑完门禁就发到 npm。
+
+## 许可证
+
+MIT
