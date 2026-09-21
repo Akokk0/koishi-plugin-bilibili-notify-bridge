@@ -13,11 +13,11 @@
  * 里嗅探到的)因此白得一个**任意本地文件读取**;而现场看上去一切正常:发出去了、回执 ok。
  * 判在**调 `file()` 之前**:拦在之后的话文件已经读进内存了。
  *
- * 🔴 **要有超时**。BN 最多等 30 秒(协议 §5.4),超了那条推送就按失败记账。一条没有超时的
- * 下载会让主人看到「推送卡着不动」—— 比一条明确的失败难查得多。
+ * 🔴 **要有整趟的时限**。BN 最多等 30 秒(协议 §5.4),超了那条推送就按失败记账。一条没有超时的
+ * 下载会让主人看到「推送卡着不动」—— 比一条明确的失败难查得多。时限连读 body 那段一起算。
  *
- * 🔴 **要有上限**。图整个进内存、交给适配器时还要 base64 一遍(再涨三分之一)。没有上限
- * 就是一条「递一条大文件的地址过来即可把 koishi 打爆」的路。
+ * 🔴 **要有上限,边读边数**。图整个进内存、交给适配器时还要 base64 一遍(再涨三分之一)。没有
+ * 上限就是一条「递一条大文件的地址过来即可把 koishi 打爆」的路;读完再判等于已经被打爆了。
  *
  * 🔴 **不走 koishi 的全局代理**(见 `DIRECT`)。
  *
@@ -45,12 +45,39 @@ export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
  */
 export const DIRECT = { proxyAgent: "" } as const;
 
+/** 取图那一趟交给 `ctx.http` 的配置。 */
+export interface ImageRequestConfig {
+	method: "GET";
+	/** 🔴 要的是**流**:整个读完再比上限,等于已经被打爆了。 */
+	responseType: "stream";
+	/** `ctx.http` 自己那只超时 —— 只管到响应头回来为止,读 body 那段归 `signal`。 */
+	timeout: number;
+	/** 整趟(连读 body)的时限由这边自己看表,到点从这里掐。 */
+	signal: AbortSignal;
+	/**
+	 * 状态码自己判。交给 plugin-http 判的话,它碰到 4xx / 5xx 会先把**整个**错误页读进内存
+	 * (`defaultDecoder`)才抛 —— 这一截没有上限。
+	 */
+	validateStatus(status: number): boolean;
+	proxyAgent: string;
+}
+
+/** `ctx.http()` 回来的那个响应里我们真用到的几格。流式时 `data` 就是响应体那条流。 */
+export interface ImageResponse {
+	status: number;
+	headers: { get(name: string): string | null };
+	data: ReadableStream<Uint8Array> | null;
+}
+
 /** `ctx.http` 本身(它能直接调)上我们真用到的那一种调法(测试拿它塞假的)。 */
 export interface ImageHttp {
-	(
-		url: string,
-		config: { method: "GET"; responseType: "arraybuffer"; timeout: number; proxyAgent: string },
-	): Promise<{ data: ArrayBuffer; headers: { get(name: string): string | null } }>;
+	(url: string, config: ImageRequestConfig): Promise<ImageResponse>;
+}
+
+/** 测试拿它把时限、上限调小;生产里不传,用上面那两个常量。 */
+export interface FetchImageOptions {
+	timeoutMs?: number;
+	maxBytes?: number;
 }
 
 /** 认图要看的字节数:WEBP 要看到第 12 个字节(`RIFF`….`WEBP`),ISO-BMFF 的品牌也在 8..12。 */
@@ -133,6 +160,7 @@ function mimeOrRefuse(head: Uint8Array, declared: string): string {
 export async function fetchImage(
 	http: ImageHttp,
 	url: string,
+	options: FetchImageOptions = {},
 ): Promise<{ data: Uint8Array; mime: string }> {
 	const protocol = protocolOf(url);
 	// 说清是什么协议、哪条地址:这条真触发时主人得看得出是 BN 递了条奇怪的东西过来,
@@ -142,19 +170,92 @@ export async function fetchImage(
 		throw new Error(`图只从 http / https 取,这条是 ${protocol}:${url}`);
 	}
 
-	const response = await http(url, {
-		method: "GET",
-		responseType: "arraybuffer",
-		timeout: IMAGE_FETCH_TIMEOUT_MS,
-		...DIRECT,
-	});
-	const declared = declaredTypeOf(response.headers.get("content-type"));
-	const data = response.data;
-	if (data.byteLength > MAX_IMAGE_BYTES) {
-		throw new Error(`这张图太大(${data.byteLength} 字节,上限 ${MAX_IMAGE_BYTES}):${url}`);
+	const timeoutMs = options.timeoutMs ?? IMAGE_FETCH_TIMEOUT_MS;
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_BYTES;
+	/**
+	 * 🔴 **整趟的时限自己看表。** 流式读的时候,`ctx.http` 自己那只超时在响应头回来那一刻就撤了
+	 * (plugin-http 在 `finally` 里清掉它)—— 一滴一滴给的对头能把读 body 那段拖到天荒地老。
+	 */
+	const abort = new AbortController();
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		abort.abort(new Error("取图超时"));
+	}, timeoutMs);
+	try {
+		const response = await http(url, {
+			method: "GET",
+			responseType: "stream",
+			timeout: timeoutMs,
+			signal: abort.signal,
+			validateStatus: () => true,
+			...DIRECT,
+		});
+		return await readImage(response, maxBytes);
+	} catch (err) {
+		// 不管是哪一种失败,连接都掐掉 —— 别让一条没人要的下载接着往内存里灌。
+		abort.abort();
+		if (timedOut) throw new Error(`取图超时(超过 ${timeoutMs}ms)`);
+		throw err;
+	} finally {
+		clearTimeout(timer);
 	}
-	const bytes = new Uint8Array(data);
-	return { data: bytes, mime: mimeOrRefuse(bytes.subarray(0, SNIFF_BYTES), declared) };
+}
+
+/**
+ * 读响应体。**边读边判**:状态码、声称的类型、Content-Length 在读 body 之前判;读的时候边数
+ * 边比上限,够认魔数时当场认 —— 哪一道没过都当场掐掉那条流,不把剩下的拉下来。
+ */
+async function readImage(
+	response: ImageResponse,
+	maxBytes: number,
+): Promise<{ data: Uint8Array; mime: string }> {
+	const reader = response.data?.getReader();
+	try {
+		if (response.status < 200 || response.status >= 300) {
+			throw new Error(`对面回了 HTTP ${response.status}`);
+		}
+		const declared = declaredTypeOf(response.headers.get("content-type"));
+		// 说了超就不读。没说、或者说得不对(撒谎说小)的,下面边读边数照样拦得住。
+		const length = response.headers.get("content-length")?.trim();
+		if (length !== undefined && /^\d+$/.test(length) && Number(length) > maxBytes) {
+			throw new Error(`这张图太大(Content-Length 说 ${length} 字节,上限 ${maxBytes}),没下`);
+		}
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		let mime: string | undefined;
+		while (reader) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				throw new Error(`这张图太大了,读到 ${total} 字节还没完,超过上限 ${maxBytes},已中止下载`);
+			}
+			chunks.push(value);
+			// 够认了就当场认:不是图的话,别先把它整个(最多 maxBytes)拉下来再说。
+			if (mime === undefined && total >= SNIFF_BYTES) {
+				mime = mimeOrRefuse(concat(chunks, total).subarray(0, SNIFF_BYTES), declared);
+			}
+		}
+		const data = concat(chunks, total);
+		// 整个都不到 SNIFF_BYTES 字节的,读完再认(认不出就拒)。
+		return { data, mime: mime ?? mimeOrRefuse(data, declared) };
+	} catch (err) {
+		// 掐掉那条流:不读了。这一步自己的失败没什么可说的,别让它盖过真正的原因。
+		reader?.cancel().catch(() => {});
+		throw err;
+	}
+}
+
+function concat(chunks: readonly Uint8Array[], total: number): Uint8Array {
+	if (chunks.length === 1 && chunks[0]?.byteLength === total) return chunks[0];
+	const out = new Uint8Array(total);
+	let at = 0;
+	for (const chunk of chunks) {
+		out.set(chunk, at);
+		at += chunk.byteLength;
+	}
+	return out;
 }
 
 /** 解析不动就回 `undefined` —— 「不是个 URL」和「是个别的协议」要分开说。 */

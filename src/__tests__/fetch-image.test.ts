@@ -35,23 +35,83 @@ function ftyp(brand: string): string {
 }
 
 /**
+ * 响应体:一块一块给,**要一块才给一块**(`highWaterMark: 0`),并记下被要了几块、有没有
+ * 被掐掉 —— 「边读边判、判了就停」要钉的正是这两样。`hang` 为真时给完之后不再说话(也不收尾),
+ * 只有 `signal` 被掐时才出错 —— 照 undici 的样子。
+ */
+function streamOf(
+	chunks: readonly Uint8Array[],
+	stats: { pulled: number; cancelled: boolean },
+	signal: AbortSignal | undefined,
+	hang = false,
+) {
+	let at = 0;
+	return new ReadableStream<Uint8Array>(
+		{
+			start(controller) {
+				signal?.addEventListener("abort", () => controller.error(signal.reason));
+			},
+			pull(controller) {
+				if (at >= chunks.length) {
+					if (hang) return new Promise<void>(() => {});
+					controller.close();
+					return;
+				}
+				stats.pulled += 1;
+				controller.enqueue(chunks[at++] as Uint8Array);
+			},
+			cancel() {
+				stats.cancelled = true;
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+}
+
+/**
  * `ctx.http` 的替身:它本身能直接调(`ctx.http(url, config)`),身上也挂着 `file()`。两条口
  * 都记账 —— 「走的是哪条口、带了什么配置」正是要钉的东西。
+ *
+ * 照 `@cordisjs/plugin-http` 的样子交响应体:`responseType: "stream"` 交那条流本身,
+ * `"arraybuffer"`(以及 `file()`)先**整个读完**再交 —— 后者正是「读完再判等于已经被打爆了」。
  */
-function fakeHttp(over: { data?: ArrayBuffer; type?: string | null } = {}) {
+function fakeHttp(
+	over: {
+		data?: ArrayBuffer;
+		chunks?: Uint8Array[];
+		type?: string | null;
+		status?: number;
+		headers?: Record<string, string>;
+		hang?: boolean;
+	} = {},
+) {
 	const calls: Array<{ via: "request" | "file"; url: string; config: Record<string, unknown> }> = [];
+	const stats = { pulled: 0, cancelled: false };
 	const type = "type" in over ? over.type : "image/png";
-	const data = over.data ?? body(PNG_HEAD);
-	const headers = new Headers(type ? { "content-type": type } : {});
+	const chunks = over.chunks ?? [new Uint8Array(over.data ?? body(PNG_HEAD))];
+	const headers = new Headers({ ...(type ? { "content-type": type } : {}), ...over.headers });
+	async function drain(stream: ReadableStream<Uint8Array>): Promise<ArrayBuffer> {
+		const parts: Uint8Array[] = [];
+		for await (const part of stream) parts.push(part);
+		const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+		let at = 0;
+		for (const part of parts) {
+			out.set(part, at);
+			at += part.byteLength;
+		}
+		return out.buffer;
+	}
 	const request = async (url: string, config: Record<string, unknown>) => {
 		calls.push({ via: "request", url, config });
-		return { url, status: 200, statusText: "OK", headers, data };
+		const stream = streamOf(chunks, stats, config.signal as AbortSignal | undefined, over.hang);
+		const data = config.responseType === "stream" ? stream : await drain(stream);
+		return { url, status: over.status ?? 200, statusText: "", headers, data };
 	};
 	const file = async (url: string, config: Record<string, unknown>) => {
 		calls.push({ via: "file", url, config });
-		return { data, type };
+		return { data: await drain(streamOf(chunks, stats, undefined)), type };
 	};
-	return { calls, http: Object.assign(request, { file }) as never };
+	return { calls, stats, http: Object.assign(request, { file }) as never };
 }
 
 describe("只取 http / https", () => {
@@ -121,6 +181,93 @@ describe("不走代理", () => {
 		assert.equal(h.calls.length, 1);
 		assert.equal(h.calls[0]?.via, "request", "走了 http.file() —— 那条口关不掉代理");
 		assert.equal(h.calls[0]?.config.proxyAgent, "");
+	});
+});
+
+/**
+ * 🔴 **大小上限边读边判。** 读完再比等于已经被打爆了 —— 递一条大文件的地址过来,整个先进了
+ * 内存。所以:Content-Length 说超了就不读;没说(或者说了假话)就边读边数,超了当场掐掉;
+ * 够认魔数时当场认,不是图就别把它整个拉下来。
+ */
+describe("边读边判", () => {
+	const png = (size: number) => new Uint8Array(body(PNG_HEAD, size));
+	const zeros = (size: number) => new Uint8Array(size);
+
+	it("Content-Length 说超了 → 一个字节都不读就拒,并说清多大、上限多少", async () => {
+		const h = fakeHttp({ chunks: [png(64), zeros(64)], headers: { "content-length": "128" } });
+		await assert.rejects(
+			() => fetchImage(h.http, "http://bn/ext/bridge/blob/big", { maxBytes: 100 }),
+			(err: Error) => {
+				assert.match(err.message, /128/, "没说这张有多大");
+				assert.match(err.message, /100/, "没说上限是多少");
+				return true;
+			},
+		);
+		assert.equal(h.stats.pulled, 0, "Content-Length 已经说超了,还是读了");
+		assert.ok(h.stats.cancelled, "没把那条响应掐掉");
+	});
+
+	it("没给 Content-Length → 边读边数,超了当场掐掉,不把剩下的拉完", async () => {
+		const chunks = [png(40), ...Array.from({ length: 50 }, () => zeros(40))];
+		const h = fakeHttp({ chunks });
+		await assert.rejects(
+			() => fetchImage(h.http, "http://bn/ext/bridge/blob/big", { maxBytes: 100 }),
+			/上限 100/,
+		);
+		assert.equal(h.stats.pulled, 3, "超了上限还在往下读");
+		assert.ok(h.stats.cancelled, "没把那条响应掐掉");
+	});
+
+	/** Content-Length 可以撒谎(说得小):照样边读边数。 */
+	it("Content-Length 说得比实际小 → 照样在读到上限时掐掉", async () => {
+		const chunks = [png(40), ...Array.from({ length: 50 }, () => zeros(40))];
+		const h = fakeHttp({ chunks, headers: { "content-length": "40" } });
+		await assert.rejects(
+			() => fetchImage(h.http, "http://bn/ext/bridge/blob/big", { maxBytes: 100 }),
+			/上限 100/,
+		);
+		assert.equal(h.stats.pulled, 3);
+	});
+
+	it("头一块就认得出不是图 → 当场拒,不把剩下的拉下来", async () => {
+		const page = new TextEncoder().encode("<html><body>login</body></html>");
+		const h = fakeHttp({ chunks: [page, ...Array.from({ length: 50 }, () => zeros(1024))] });
+		await assert.rejects(() => fetchImage(h.http, "http://bn/x"), /不像图片/);
+		assert.equal(h.stats.pulled, 1, "认出不是图之后还在往下读");
+		assert.ok(h.stats.cancelled, "没把那条响应掐掉");
+	});
+
+	it("魔数被切在几块里 → 凑齐了照认", async () => {
+		const head = new Uint8Array(body(PNG_HEAD, 16));
+		const h = fakeHttp({ chunks: [head.subarray(0, 3), head.subarray(3, 9), head.subarray(9)] });
+		const out = await fetchImage(h.http, "http://bn/x");
+		assert.equal(out.mime, "image/png");
+		assert.deepEqual([...out.data], [...head], "拼回来的字节不对");
+	});
+
+	/**
+	 * 🔴 流式读的时候,`ctx.http` 自己那只超时**在响应头回来那一刻就撤了**
+	 * (plugin-http 在 `finally` 里清掉它)—— 一滴一滴给的对头能把读 body 那段拖到天荒地老。
+	 * 所以整趟(连读 body)要自己看表。
+	 */
+	it("对头给了个头就不说话了 → 到点掐掉,说是超时", async () => {
+		const h = fakeHttp({ chunks: [png(16)], hang: true });
+		await assert.rejects(
+			() => fetchImage(h.http, "http://bn/x", { timeoutMs: 20 }),
+			/超时/,
+		);
+	});
+
+	/**
+	 * 状态码自己判:交给 plugin-http 判的话,它碰到 4xx / 5xx 会先把**整个**错误页读进内存
+	 * (`defaultDecoder`)才抛 —— 这一截又没有上限。
+	 */
+	it("对头回 404 → 拒并说出状态码,响应体一个字节都不读", async () => {
+		const h = fakeHttp({ status: 404, chunks: [png(64)] });
+		await assert.rejects(() => fetchImage(h.http, "http://bn/x"), /404/);
+		assert.equal(h.stats.pulled, 0);
+		const validate = h.calls[0]?.config.validateStatus as ((status: number) => boolean) | undefined;
+		assert.equal(validate?.(500), true, "状态码交给了 plugin-http 判 —— 它会把错误页整个读进来");
 	});
 });
 
