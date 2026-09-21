@@ -18,6 +18,8 @@
  *
  * 🔴 **要有上限**。图整个进内存、交给适配器时还要 base64 一遍(再涨三分之一)。没有上限
  * 就是一条「递一条大文件的地址过来即可把 koishi 打爆」的路。
+ *
+ * 🔴 **不走 koishi 的全局代理**(见 `DIRECT`)。
  */
 
 /** 比 BN 那 30 秒的回执窗口短一截 —— 超时了还来得及回一句人话。 */
@@ -25,9 +27,26 @@ export const IMAGE_FETCH_TIMEOUT_MS = 20_000;
 /** BN 出的卡再大也就几百 KB;16 MiB 是给「明显不对劲」留的门,不是给正常图留的余量。 */
 export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
-/** `ctx.http` 上我们真用到的那一格(测试拿它塞假的)。 */
+/**
+ * 逐请求关掉 koishi 的全局代理 —— 并进请求配置里用。
+ *
+ * 🔴 koishi 的 loader 会装 proxy-agent,之后**每个** `ctx.http` 请求(连 `ctx.http.ws` 那条
+ * WebSocket 也是)都套全局代理:内网 BN 的地址被送进代理,要么连不上 / 取不到,要么一次性的
+ * 取图 URL 泄露给代理。BN 的地址是用户直接填的,怎么连到它由这个地址说了算。
+ *
+ * 为什么是空串:proxy-agent 那头取的是 `config?.proxyAgent ?? 全局那个`,空串过得了 `??`、
+ * 过不了紧跟着的那道 `if (!proxy) return` —— 于是这一个请求不挂代理。`undefined` 不行
+ * (被 `??` 退回全局那个)。`http.file()` 那条口只收 `timeout`,传不下去,所以取图得走
+ * `ctx.http()` 本身。
+ */
+export const DIRECT = { proxyAgent: "" } as const;
+
+/** `ctx.http` 本身(它能直接调)上我们真用到的那一种调法(测试拿它塞假的)。 */
 export interface ImageHttp {
-	file(url: string, options: { timeout: number }): Promise<{ data: ArrayBuffer; type?: string | null }>;
+	(
+		url: string,
+		config: { method: "GET"; responseType: "arraybuffer"; timeout: number; proxyAgent: string },
+	): Promise<{ data: ArrayBuffer; headers: { get(name: string): string | null } }>;
 }
 
 export async function fetchImage(
@@ -42,13 +61,19 @@ export async function fetchImage(
 		throw new Error(`图只从 http / https 取,这条是 ${protocol}:${url}`);
 	}
 
-	const file = await http.file(url, { timeout: IMAGE_FETCH_TIMEOUT_MS });
-	if (file.data.byteLength > MAX_IMAGE_BYTES) {
-		throw new Error(`这张图太大(${file.data.byteLength} 字节,上限 ${MAX_IMAGE_BYTES}):${url}`);
+	const response = await http(url, {
+		method: "GET",
+		responseType: "arraybuffer",
+		timeout: IMAGE_FETCH_TIMEOUT_MS,
+		...DIRECT,
+	});
+	const data = response.data;
+	if (data.byteLength > MAX_IMAGE_BYTES) {
+		throw new Error(`这张图太大(${data.byteLength} 字节,上限 ${MAX_IMAGE_BYTES}):${url}`);
 	}
 	// 🔴 回 `undefined` 而不是 `null` / 空串:渲染那一层拿 `??` 去接帧里声明的那个 mime,
 	// 而 `h.image(data, null)` 发出去的是已废弃的 `base64://`(见 message.ts)。
-	return { data: new Uint8Array(file.data), mime: file.type || undefined };
+	return { data: new Uint8Array(data), mime: response.headers.get("content-type") || undefined };
 }
 
 /** 解析不动就回 `undefined` —— 「不是个 URL」和「是个别的协议」要分开说。 */

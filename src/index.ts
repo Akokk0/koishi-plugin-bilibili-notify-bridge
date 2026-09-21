@@ -15,7 +15,7 @@ import { botsOf, sidOf } from "./bots";
 import { capabilitiesFor } from "./capabilities";
 import { createBridgeClient } from "./client";
 import { deliverSend } from "./deliver";
-import { fetchImage } from "./fetch-image";
+import { DIRECT, fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
 import { shouldProbe } from "./probe";
@@ -131,8 +131,14 @@ export function apply(ctx: Context, config: Config) {
 	const client = createBridgeClient({
 		url: config.url,
 		// token 走 upgrade 的请求头,不进 URL —— URL 会落进反代的访问日志。
+		// 🔴 **直连**(`DIRECT`):koishi 的全局代理会套到这条 WebSocket 上 —— 内网的 BN 被送进
+		// 代理就连不上,token 还跟着 upgrade 头进了代理。BN 的地址是用户直接填的,怎么连到它由
+		// 这个地址说了算。
 		open: () =>
-			ctx.http.ws(config.url, { headers: { Authorization: `Bearer ${config.token}` } }),
+			ctx.http.ws(config.url, {
+				headers: { Authorization: `Bearer ${config.token}` },
+				...DIRECT,
+			}),
 		// 现取:重连时报的是**那一刻**的名单,不是插件启动时的。
 		bots: snapshot,
 		version: VERSION,

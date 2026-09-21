@@ -19,20 +19,24 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fetchImage, IMAGE_FETCH_TIMEOUT_MS, MAX_IMAGE_BYTES } from "../fetch-image";
 
+/**
+ * `ctx.http` 的替身:它本身能直接调(`ctx.http(url, config)`),身上也挂着 `file()`。两条口
+ * 都记账 —— 「走的是哪条口、带了什么配置」正是要钉的东西。
+ */
 function fakeHttp(over: { data?: ArrayBuffer; type?: string | null } = {}) {
-	const calls: Array<{ url: string; options: { timeout: number } }> = [];
-	return {
-		calls,
-		http: {
-			async file(url: string, options: { timeout: number }) {
-				calls.push({ url, options });
-				return {
-					data: over.data ?? new ArrayBuffer(8),
-					type: "type" in over ? over.type : "image/png",
-				};
-			},
-		},
+	const calls: Array<{ via: "request" | "file"; url: string; config: Record<string, unknown> }> = [];
+	const type = "type" in over ? over.type : "image/png";
+	const data = over.data ?? new ArrayBuffer(8);
+	const headers = new Headers(type ? { "content-type": type } : {});
+	const request = async (url: string, config: Record<string, unknown>) => {
+		calls.push({ via: "request", url, config });
+		return { url, status: 200, statusText: "OK", headers, data };
 	};
+	const file = async (url: string, config: Record<string, unknown>) => {
+		calls.push({ via: "file", url, config });
+		return { data, type };
+	};
+	return { calls, http: Object.assign(request, { file }) as never };
 }
 
 describe("只取 http / https", () => {
@@ -80,9 +84,28 @@ describe("超时", () => {
 	it("带着一个短于 BN 那 30 秒窗口的超时下去", async () => {
 		const h = fakeHttp();
 		await fetchImage(h.http, "http://bn/ext/bridge/blob/aaaa");
-		assert.equal(h.calls[0]?.options.timeout, 20_000);
+		assert.equal(h.calls[0]?.config.timeout, 20_000);
 		assert.equal(IMAGE_FETCH_TIMEOUT_MS, 20_000);
 		assert.ok(IMAGE_FETCH_TIMEOUT_MS < 30_000, "比 BN 的回执窗口还长,等于没有超时");
+	});
+});
+
+/**
+ * 🔴 **取图不走 koishi 的全局代理。** koishi 的 loader 会装 proxy-agent,每个 `ctx.http` 请求都
+ * 套全局代理:内网 BN 的取图地址被送进代理 —— 要么取不到,要么这条一次性 URL 泄露给代理。
+ * BN 的地址是用户直接填的,怎么连到它由这个地址说了算。
+ *
+ * 逐请求关掉代理的写法是请求配置里 `proxyAgent: ""`(proxy-agent 那头是
+ * `config?.proxyAgent ?? 全局那个`,空串过得了 `??`、过不了之后那道 `if (!proxy)`)。
+ * `http.file()` 那条口只收 `timeout`,传不下去 —— 所以得走 `ctx.http()` 本身。
+ */
+describe("不走代理", () => {
+	it("走 ctx.http() 本身、带着 proxyAgent: \"\",不走 http.file()", async () => {
+		const h = fakeHttp();
+		await fetchImage(h.http, "http://192.168.1.5:8787/ext/bridge/blob/aaaa");
+		assert.equal(h.calls.length, 1);
+		assert.equal(h.calls[0]?.via, "request", "走了 http.file() —— 那条口关不掉代理");
+		assert.equal(h.calls[0]?.config.proxyAgent, "");
 	});
 });
 
