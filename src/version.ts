@@ -5,4 +5,4 @@
  * 加载即炸(`@koishijs/loader` 里一处 class extends),测试进不去。
  * 与 `package.json` 的一致性由 `__tests__/version.test.ts` 钉着。
  */
-export const VERSION = "0.0.1";
+export const VERSION = "0.0.2";
