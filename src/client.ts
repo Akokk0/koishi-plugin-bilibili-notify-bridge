@@ -55,6 +55,8 @@ export interface BridgeClientOptions {
 	backoff?(attempt: number): number;
 	/** 排一个定时器,回一个取消函数。生产里交进来的是 koishi 的 `ctx.setTimeout`。 */
 	later(fn: () => void, ms: number): () => void;
+	/** 现在几点(毫秒)。默认 `Date.now`;测试拿它拨钟。 */
+	now?(): number;
 }
 
 export interface BridgeClient {
@@ -123,12 +125,23 @@ function bridgeBackoffMs(attempt: number): number {
  */
 export const BRIDGE_SILENCE_LIMIT_MS = 90_000;
 
+/**
+ * 握完手之后要稳稳跑满这么久,断了才从最短那档重新退避。
+ *
+ * 🔴 光握过手不够:BN 回了 welcome 转手又断(断的码又是该重连的那种)时,每一轮都握过手 ——
+ * 照握手清零,这个循环就永远用 0.5 秒那档去捶 BN。
+ */
+export const STABLE_SESSION_MS = 60_000;
+
 export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	const backoff = opts.backoff ?? bridgeBackoffMs;
+	const now = opts.now ?? Date.now;
 	let socket: SocketLike | undefined;
 	let shook = false;
 	let disposed = false;
 	let attempt = 0;
+	/** 这一条连接收到 welcome 的时刻(`now()` 读数);没握上手是 `undefined`。退避清不清零看它。 */
+	let welcomedAt: number | undefined;
 	let cancelRetry: (() => void) | undefined;
 	/** 一条 socket 只安排一次重连:`error` 与 `close` 往往接连来。 */
 	let scheduled = false;
@@ -204,6 +217,10 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	function retry(why: string): void {
 		if (disposed || scheduled) return;
 		scheduled = true;
+		// 🔴 握完手还得**稳稳跑满一阵**,这一断才算新的意外、从最短那档重新数。按「socket 开了」
+		// 或「握完手」清零,连上就被踢的循环都会一直用最短那档去捶 BN(见 `STABLE_SESSION_MS`)。
+		// 判在这儿而不是 close 那头:看门狗踢掉的那一路也走这儿,对退避来说两者没有区别。
+		if (welcomedAt !== undefined && now() - welcomedAt >= STABLE_SESSION_MS) attempt = 0;
 		const wait = backoff(attempt);
 		attempt += 1;
 		opts.log.info(`${why},${wait}ms 后重连(第 ${attempt} 次)`);
@@ -231,9 +248,9 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		switch (frame.type) {
 			case "welcome": {
 				shook = true;
-				// 握完手才算连通,退避从头数 —— 按「socket 开了」算的话,一个连上就被踢的
-				// 循环会一直用最短那档去捶 BN。
-				attempt = 0;
+				// 退避**不在这儿**清零,只记下握手的时刻:握完手转手就被踢的循环每一轮都握过手,
+				// 在这儿清零的话它永远用最短那档去捶 BN。清不清等这条连接没了再看(见 `retry`)。
+				welcomedAt = now();
 				opts.log.info(`已连上 bilibili-notify v${frame.server?.version ?? "?"}`);
 				opts.onWelcome(frame.inbound);
 				break;
@@ -260,6 +277,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		scheduled = false;
 		shook = false;
 		refusedBy = undefined;
+		// 上一条连接的握手时刻跟着作废 —— 这一条还没握上手。
+		welcomedAt = undefined;
 		// 新的一条连接什么都不知道,hello 自己会报全量名单 —— 去重的记忆跟着清空,不然
 		// 上一条连接上发过的那份会把这一条的第一次推送咽掉。
 		sentBots = undefined;

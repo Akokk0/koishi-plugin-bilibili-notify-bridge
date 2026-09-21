@@ -7,7 +7,12 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { BRIDGE_SILENCE_LIMIT_MS, createBridgeClient, type SocketLike } from "../client";
+import {
+	BRIDGE_SILENCE_LIMIT_MS,
+	createBridgeClient,
+	type SocketLike,
+	STABLE_SESSION_MS,
+} from "../client";
 import { BRIDGE_PROTOCOL_VERSION, MAX_ERR_CHARS } from "../protocol";
 
 class FakeSocket implements SocketLike {
@@ -427,6 +432,87 @@ describe("断了之后", () => {
 		connect();
 		sockets[0]?.fire("close", { code: 4007 });
 		assert.equal(timers.length, 1);
+	});
+
+	/**
+	 * 🔴 **按「握完手」清零不够**:BN 收下 hello、回了 welcome、转手又把连接断掉(断的码又是
+	 * 该重连的那种)时,每一轮都握过手 —— 照握手清零的话,这个循环永远用最短的 0.5 秒去捶 BN。
+	 */
+	it("握完手转手就被踢的循环,退避照样往上涨", () => {
+		const asked: number[] = [];
+		client({
+			backoff: (attempt) => {
+				asked.push(attempt);
+				return 10;
+			},
+			now: () => 0,
+		});
+		for (let round = 0; round < 4; round++) {
+			sockets[round]?.fire("open");
+			sockets[round]?.say(WELCOME);
+			sockets[round]?.fire("close", { code: 1011 });
+			fireTimer();
+		}
+		assert.deepEqual(asked, [0, 1, 2, 3], "握完手就被踢的循环,退避没往上涨");
+	});
+
+	/**
+	 * 连接**稳稳地跑过一阵**才算真的好了:那之后再断就是一次新的意外,从最短那档重新数 ——
+	 * 不然 BN 重启一次,插件要背着上一次断网攒下的 30 秒才回得去。「一阵」从 welcome 起算。
+	 */
+	it("握完手稳稳跑满 STABLE_SESSION_MS 再断,退避从头数;差一点都不算", () => {
+		const asked: number[] = [];
+		let clock = 0;
+		client({
+			backoff: (attempt) => {
+				asked.push(attempt);
+				return 10;
+			},
+			now: () => clock,
+		});
+		// 先连不上两次,把退避攒起来。
+		for (let round = 0; round < 2; round++) {
+			sockets[round]?.fire("close", { code: 1006 });
+			fireTimer();
+		}
+		assert.deepEqual(asked, [0, 1]);
+
+		// 握完手撑了差一毫秒就断:还不算稳,接着往上数。welcome 来得晚 —— 从 socket 开起算
+		// 早就够了,从 welcome 起算还差一点。
+		sockets[2]?.fire("open");
+		clock += 30_000;
+		sockets[2]?.say(WELCOME);
+		clock += STABLE_SESSION_MS - 1;
+		sockets[2]?.fire("close", { code: 1006 });
+		assert.equal(asked.at(-1), 2, "没稳住的连接一断,退避就从头数了");
+		fireTimer();
+
+		// 这一条稳稳跑满了:断了从最短那档重新数。
+		sockets[3]?.fire("open");
+		sockets[3]?.say(WELCOME);
+		clock += STABLE_SESSION_MS;
+		sockets[3]?.fire("close", { code: 1006 });
+		assert.equal(asked.at(-1), 0, "跑满了一阵的连接断了,退避还背着旧账");
+	});
+
+	/** 被看门狗踢掉那一路也看同一个判据 —— 它和收到一个 close 没有区别。 */
+	it("稳稳跑满之后被看门狗踢掉,也从头数", () => {
+		const asked: number[] = [];
+		let clock = 0;
+		client({
+			backoff: (attempt) => {
+				asked.push(attempt);
+				return 10;
+			},
+			now: () => clock,
+		});
+		sockets[0]?.fire("close", { code: 1006 });
+		fireTimer();
+		sockets[1]?.fire("open");
+		sockets[1]?.say(WELCOME);
+		clock += STABLE_SESSION_MS;
+		watchdog()?.fn();
+		assert.deepEqual(asked, [0, 0]);
 	});
 
 	/**
