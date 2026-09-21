@@ -24,6 +24,27 @@ export const BRIDGE_CAPABILITIES = [
 ] as const;
 export type BridgeCapability = (typeof BRIDGE_CAPABILITIES)[number];
 
+/**
+ * 一个账号 / 群号 → BN 收得下的样子;`undefined` = 说不清,**这一格别往上报**。
+ *
+ * BN 那头的 id 格一律是 `z.string().min(1)`:缺一格、空串、数字,都是畸形帧 → close 4003 →
+ * 插件把它当终局,**永不重连** —— 一条消息、一个 bot 就能把整条桥打死。而 koishi 的类型说
+ * 是 `string` 的那几格,运行时可以是任何东西:Telegram 频道帖没有发送者(`userId` 是
+ * `undefined`),第三方适配器塞个数字进来也照收。
+ *
+ * 非空字符串原样;安全整数范围内的整数转成字符串(意思是清楚的);其余(`undefined`、空串、
+ * 布尔、对象、小数、`NaN`、大到失了精度的数)一律当没有 —— `"true"`、`"1.5"`、`"1e+21"`
+ * 这种转出来谁都不认得。
+ *
+ * 🔴 **同一个号在哪儿都得过这一道**:发送者、群号、bot 自己的账号、名单上的 `selfId`。各判
+ * 各的话,`10000` 和 `"10000"` 永远比不上 —— bot 认不出自己发的消息,无限回卡。
+ */
+export function idOf(value: unknown): string | undefined {
+	if (typeof value === "string") return value === "" ? undefined : value;
+	if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+	return undefined;
+}
+
 /** 三态,不是布尔 —— 「不支持」是结论,「还不知道」是「试试看,可能行」。 */
 export type BridgeCapabilityState = "supported" | "unsupported" | "unknown";
 export type BridgeCapabilityReport = Record<BridgeCapability, BridgeCapabilityState>;

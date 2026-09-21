@@ -7,16 +7,22 @@
 
 import h from "@satorijs/element";
 import { type CardElementLike, cardLinksOf } from "./onebot";
-import type { BridgeInboundMessage, BridgeInboundSubscription } from "./protocol";
+import { type BridgeInboundMessage, type BridgeInboundSubscription, idOf } from "./protocol";
 
-/** 只依赖这几格 —— 写全 koishi 的 `Session` 等于把整个框架焊进这一层。 */
+/**
+ * 只依赖这几格 —— 写全 koishi 的 `Session` 等于把整个框架焊进这一层。
+ *
+ * 🔴 三个 id 格故意写成 `unknown`:koishi 的类型说它们是 `string`,可运行时 `userId` 就是
+ * `event.user?.id` —— Telegram 频道帖没有发送者,那一格是 `undefined`;第三方适配器塞个
+ * 数字进来也照收。照类型信了它,就是往 BN 送一帧畸形的(见 `idOf`)。
+ */
 export interface SessionLike {
 	/** 收到这条消息的那个 bot 在哪个平台上 —— 拼 `botId` 要它。 */
 	platform: string;
-	selfId: string;
-	userId: string;
+	selfId?: unknown;
+	userId?: unknown;
 	/** 消息所在的频道。群消息拿它当群号 —— BN 回卡也回到这儿。 */
-	channelId: string;
+	channelId?: unknown;
 	isDirect: boolean;
 	/** koishi 的原始正文,**带元素标记**。 */
 	content: string;
@@ -57,8 +63,14 @@ export function inboundOf(
 	 */
 	isOurs: (platform: string, userId: string) => boolean,
 ): BridgeInboundMessage | null {
+	// 🔴 拿不到发送者的不驮(频道帖就没有发送者):BN 那头 `userId` 是 `z.string().min(1)`,
+	// 缺了这一格 → 畸形帧 → close 4003 → 插件当终局永不重连。
+	const userId = idOf(session.userId);
+	if (userId === undefined) return null;
+
 	// 🔴 bot 自己发的一律不驮。漏了它,BN 会解析自己刚发出去的那条链接再回一张卡 —— 无限回卡。
-	if (session.userId === session.selfId) return null;
+	// 两边**过同一道归一**:bot 的账号是数字、发送者是字符串时,不归一就永远比不上。
+	if (userId === idOf(session.selfId)) return null;
 
 	// 🔴 **兄弟 bot 发的同样不驮。** 同一台 koishi 借出去两个号、都在同一个群里时,A 推出去的
 	// 那张卡在 B 眼里是「别人发的消息」—— 上面那道自检拦不住它,而它里面正带着一条 B 站链接:
@@ -66,7 +78,7 @@ export function inboundOf(
 	//
 	// ⚠️ 代价:**另一个借出去的 bot 真·手动发的链接也被丢掉了**。两头不对称得很明显 ——
 	// 这头是重复回卡乃至死循环,那头只是少解析一条链接。
-	if (isOurs(session.platform, session.userId)) return null;
+	if (isOurs(session.platform, userId)) return null;
 
 	// 订阅闸**排在剥正文之前**。BN 眼下不收这一档的话,下面那两步(解一遍元素树、把分享卡的
 	// json/xml 拆开)全是白干的 —— 而群消息是这条桥最大的一股流量,`group: "none"` 时每一条
@@ -79,8 +91,12 @@ export function inboundOf(
 	// 这条路上不解、也不拼 —— 拼进去的话主人在私聊里转一张卡,BN 会拿一串 URL 去匹配指令。
 	if (session.isDirect) {
 		const text = plainTextOf(session.content);
-		return text === "" ? null : { scope: "private", userId: session.userId, text };
+		return text === "" ? null : { scope: "private", userId, text };
 	}
+
+	// 群号拿不到的同样过不了 BN 的 `min(1)`,理由同上。判在解析之前:它便宜。
+	const groupId = idOf(session.channelId);
+	if (groupId === undefined) return null;
 
 	// 🔴 分享卡里的链接**单独两格**(协议 1.4),不拼进正文。拼进去等于告诉 BN「这是用户敲的
 	// 一条普通链接」—— 小程序卡因此会被回一张重复的卡(BN 那侧 `miniAppCardLinks` 刻意不解析,
@@ -106,8 +122,8 @@ export function inboundOf(
 	// 空的那格不带上去:群消息是这条桥最大的一股流量,而缺省与「这条没有那种卡」同义。
 	return {
 		scope: "group",
-		groupId: session.channelId,
-		userId: session.userId,
+		groupId,
+		userId,
 		text,
 		...(cardLinks.length > 0 ? { cardLinks } : {}),
 		...(miniAppCardLinks.length > 0 ? { miniAppCardLinks } : {}),

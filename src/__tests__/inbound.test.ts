@@ -64,6 +64,73 @@ describe("排掉 bot 自己", () => {
 	});
 });
 
+/**
+ * 🔴 **回传的群号 / 发送者 id 必须是非空字符串。** BN 那头这两格是 `z.string().min(1)`:
+ * 缺一格(JSON 里 `undefined` 那一格直接消失)、空串、数字,都是畸形帧 → close 4003 →
+ * 插件把 4003 当终局,**永不重连**。一条消息就能把整条桥打死。
+ *
+ * koishi 的类型说 `userId` 是 string,可运行时它就是 `event.user?.id` —— Telegram 频道帖
+ * 没有发送者,那一格是 `undefined`;第三方适配器塞个数字进来也照收。
+ */
+describe("id 必须是 BN 收得下的字符串", () => {
+	it("频道帖(没有发送者)→ 不驮,不是驮一条缺了 userId 的上去", () => {
+		assert.equal(inboundOf(session({ userId: undefined }), ALL, isOurs), null);
+		assert.equal(
+			inboundOf(session({ isDirect: true, userId: undefined, content: "/help" }), ALL, isOurs),
+			null,
+		);
+	});
+
+	it("发送者是空串 → 不驮", () => {
+		assert.equal(inboundOf(session({ userId: "" }), ALL, isOurs), null);
+	});
+
+	it("群号拿不到 / 是空串 → 不驮", () => {
+		assert.equal(inboundOf(session({ channelId: undefined }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ channelId: "" }), ALL, isOurs), null);
+	});
+
+	/** 数字的意思是清楚的 —— 转成字符串照发,别为这个把一条正常的链接丢掉。 */
+	it("数字的发送者 / 群号转成字符串照发", () => {
+		assert.deepEqual(inboundOf(session({ userId: 10086, channelId: 42 }), ALL, isOurs), {
+			scope: "group",
+			groupId: "42",
+			userId: "10086",
+			text: "看看这个 https://b23.tv/x",
+		});
+		assert.deepEqual(
+			inboundOf(session({ isDirect: true, userId: 10086, content: "/help" }), ALL, isOurs),
+			{ scope: "private", userId: "10086", text: "/help" },
+		);
+	});
+
+	/** 布尔、对象、小数这些意思说不清的一律不回传 —— 转出来的 `"true"`、`"1.5"` 谁都不认得。 */
+	it("布尔 / 对象 / 小数的 id → 不驮", () => {
+		assert.equal(inboundOf(session({ userId: true }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ channelId: false }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ userId: { id: "1" } }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ userId: 1.5 }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ userId: 1e21 }), ALL, isOurs), null);
+	});
+
+	/**
+	 * 🔴 「是不是自己发的」那道自检两边**过同一道归一**:bot 的账号是数字、发送者是字符串
+	 * (或者反过来)时,`10000 !== "10000"`,bot 认不出自己 —— 无限回卡。
+	 */
+	it("bot 自己的账号与发送者类型不同 → 照样认得出是自己", () => {
+		// 兄弟 bot 那道闸关掉:默认名单里就有 `onebot:10000`,留着它的话这条会被那道闸
+		// 顺手挡下,钉不住自检本身。
+		const nobody = () => false;
+		assert.equal(inboundOf(session({ selfId: 10000, userId: "10000" }), ALL, nobody), null);
+		assert.equal(inboundOf(session({ selfId: "10000", userId: 10000 }), ALL, nobody), null);
+	});
+
+	/** 兄弟 bot 那道闸拿到的也是归一之后的那个串 —— 名单上的 `botId` 是字符串拼的。 */
+	it("数字的发送者照样认得出是兄弟 bot", () => {
+		assert.equal(inboundOf(session({ userId: 20000 }), ALL, isOurs), null);
+	});
+});
+
 describe("私聊", () => {
 	it("订阅要私聊就驮上去", () => {
 		assert.deepEqual(inboundOf(session({ isDirect: true, content: "/help" }), ALL, isOurs), {
