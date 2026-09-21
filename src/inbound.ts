@@ -30,8 +30,19 @@ export interface SessionLike {
 	elements?: readonly CardElementLike[];
 }
 
-/** 判「这条里有没有链接」。够宽即可 —— 真正解析什么是 BN 的活。 */
-const HAS_LINK = /https?:\/\/\S+/i;
+/**
+ * 判「这条里有没有链接」。够宽即可 —— 真正解析什么是 BN 的活(协议 §8)。
+ *
+ * 🔴 比「含 `http://` / `https://`」宽两处,都是照 BN 自己的链接解析
+ * (BN 仓 `packages/internal/src/util/video-links.ts`)放的 —— 这一闸比它严,就等于在桥
+ * 这一侧替它把消息丢了,症状是「群里贴链接 BN 一声不吭」:
+ *
+ * - **不分大小写**:手机输入法会把句首字母大写,以链接开头的消息就成了 `Https://…`;
+ * - **`bilibili.com/`**:BN 认不带协议头的 `bilibili.com/video/BV…`。
+ *
+ * 与 AstrBot 那侧的桥是同一个式子。
+ */
+const HAS_LINK = /https?:\/\/|bilibili\.com\//i;
 
 /**
  * 把 koishi 的正文剥成人说的那些字。
@@ -108,8 +119,8 @@ export function inboundOf(
 	const hasCard = cardLinks.length > 0 || miniAppCardLinks.length > 0;
 
 	// **超集闸**:先拿**原文**挡一道,挡掉的不必再解元素树。koishi 往 content 里只转义
-	// `&` `<` `>`,`https://` 这个前缀在原文里一定原样在着 —— 所以「原文里没有」⇒「剥完也
-	// 没有」,这一闸只会放过、不会误杀。群里绝大多数消息既没链接也没卡,今天它们每一条都要
+	// `&` `<` `>`,`https://` 与 `bilibili.com/` 在原文里一定原样在着 —— 所以「原文里没有」⇒
+	// 「剥完也没有」,这一闸只会放过、不会误杀。群里绝大多数消息既没链接也没卡,今天它们每一条都要
 	// 先付一次解析元素树的钱再被丢掉(实测 1441ns/条 vs 正则 18ns/条)。
 	if (!hasCard && !HAS_LINK.test(session.content)) return null;
 

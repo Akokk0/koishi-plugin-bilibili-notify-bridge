@@ -166,6 +166,36 @@ describe("群消息", () => {
 	it("订阅说群消息一条都不要,含链接的也不驮", () => {
 		assert.equal(inboundOf(session(), { private: true, group: "none" }, isOurs), null);
 	});
+
+	/**
+	 * 🔴 **不带协议头的 B 站链接也要驮。** BN 自己的链接解析认 `bilibili.com/video/BV…`
+	 * (协议头可选,见 BN 仓 `packages/internal/src/util/video-links.ts`)—— 这一闸比它严,
+	 * 就等于在桥这一侧替它把消息丢了,症状是「群里贴链接 BN 一声不吭」。
+	 */
+	for (const content of [
+		"看看 bilibili.com/video/BV1xx411c7mD",
+		"www.bilibili.com/video/av170001 这个好看",
+		"m.BILIBILI.com/video/BV1xx411c7mD",
+	]) {
+		it(`不带协议头的 B 站链接照驮:${content}`, () => {
+			assert.deepEqual(inboundOf(session({ content }), ALL, isOurs), {
+				scope: "group",
+				groupId: "g-42",
+				userId: "10086",
+				text: content,
+			});
+		});
+	}
+
+	/** 手机输入法会把句首字母大写,以链接开头的消息就成了 `Https://…`。 */
+	it("协议头大写的照驮", () => {
+		assert.ok(inboundOf(session({ content: "Https://b23.tv/x" }), ALL, isOurs));
+	});
+
+	it("只是提到 bilibili、没有链接 → 不驮", () => {
+		assert.equal(inboundOf(session({ content: "bilibili 今天又崩了" }), ALL, isOurs), null);
+		assert.equal(inboundOf(session({ content: "b站的 bilibili.com 打不开" }), ALL, isOurs), null);
+	});
 });
 
 describe("正文", () => {
