@@ -562,6 +562,52 @@ describe("名单变了", () => {
 		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
 		assert.equal(sockets[1]?.count("bots"), 1, "重连之后把名单咽下去了");
 	});
+
+	/**
+	 * hello 自己就带着现取的全量名单,它也是这条连接上发出去的一份。koishi 的 `login-updated`
+	 * 一抖就推一次 —— 不记下来的话,每一次(重)连之后第一份一模一样的名单都要白推一遍。
+	 */
+	it("hello 里刚报过的名单不再推一遍;真变了照发", () => {
+		const c = connect();
+		c.pushBots(BOTS.map((bot) => ({ ...bot })));
+		assert.equal(sockets[0]?.count("bots"), 0, "hello 里刚报过的名单又推了一遍");
+		c.pushBots([{ botId: "kook:2", platform: "kook" }]);
+		assert.equal(sockets[0]?.count("bots"), 1, "名单真变了却没发");
+	});
+
+	it("重连之后:新 hello 报的那份也记下", () => {
+		let bots = BOTS;
+		const c = connect({ bots: () => bots });
+		sockets[0]?.fire("close", { code: 1006 });
+		fireTimer();
+		bots = [{ botId: "telegram:2", platform: "telegram" }];
+		sockets[1]?.fire("open");
+		sockets[1]?.say(WELCOME);
+		c.pushBots([{ botId: "telegram:2", platform: "telegram" }]);
+		assert.equal(sockets[1]?.count("bots"), 0, "重连后 hello 里刚报过的名单又推了一遍");
+	});
+
+	/**
+	 * 🔴 **握手期间变了的名单别丢。** hello 与 welcome 之间,`pushBots` 被「没握过手」那道闸
+	 * 挡掉(也不记)—— koishi 是事件驱动的,不补的话要等下一次登录事件才会再推,而 BN 手里那份
+	 * 一直是 hello 那一刻的旧名单。
+	 */
+	it("hello 之后、welcome 之前名单变了 → welcome 一到就补推那一份", () => {
+		let bots = BOTS;
+		const c = client({ bots: () => bots });
+		sockets[0]?.fire("open");
+		bots = [...BOTS, { botId: "kook:2", platform: "kook" }];
+		c.pushBots(bots);
+		assert.equal(sockets[0]?.count("bots"), 0, "没握手就发了");
+		sockets[0]?.say(WELCOME);
+		assert.deepEqual(sockets[0]?.last("bots"), { type: "bots", bots });
+		assert.equal(sockets[0]?.count("bots"), 1);
+	});
+
+	it("握手期间名单没变 → welcome 之后不多推一份", () => {
+		connect();
+		assert.equal(sockets[0]?.count("bots"), 0);
+	});
 });
 
 describe("断了之后", () => {

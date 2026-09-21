@@ -263,6 +263,15 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		return true;
 	}
 
+	/** 名单变了,推一份**全量快照**上去;跟这条连接上最后发出去的那份一样就不发。 */
+	function pushBots(bots: BridgeBotWire[]): void {
+		const snapshot = JSON.stringify(bots);
+		if (snapshot === sentBots) return;
+		// 没连上就不发 —— 名单是现取的,握手那一刻自然报的就是最新那份。发成了才记:
+		// 没发出去的那次要是也记下,连上之后第一份真名单就被自己咽了。
+		if (send({ type: "bots", bots })) sentBots = snapshot;
+	}
+
 	function retry(why: string): void {
 		if (disposed || scheduled) return;
 		scheduled = true;
@@ -334,6 +343,10 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 				welcomedAt = now();
 				opts.log.info(`已连上 bilibili-notify v${frame.server?.version ?? "?"}`);
 				opts.onWelcome(frame.inbound);
+				// 🔴 hello 与 welcome 之间变了的名单,`pushBots` 被「没握过手」那道闸挡掉了(也没记)。
+				// koishi 是事件驱动的,不在这儿补就要等下一次登录事件 —— BN 手里那份一直是 hello
+				// 那一刻的旧名单。现取一份走去重那条路:没变就不发。
+				pushBots(opts.bots());
 				break;
 			}
 			case "ping":
@@ -361,8 +374,8 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		refusedBy = undefined;
 		// 上一条连接的握手时刻跟着作废 —— 这一条还没握上手。
 		welcomedAt = undefined;
-		// 新的一条连接什么都不知道,hello 自己会报全量名单 —— 去重的记忆跟着清空,不然
-		// 上一条连接上发过的那份会把这一条的第一次推送咽掉。
+		// 新的一条连接什么都不知道 —— 去重的记忆跟着清空,不然上一条连接上发过的那份会把
+		// 这一条的第一次推送咽掉。hello 发出去之后再记下它报的那份。
 		sentBots = undefined;
 		let next: SocketLike;
 		try {
@@ -390,12 +403,16 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 			if (!mine()) return;
 			// hello 是第一帧,所以它**故意**不走 `send()` —— 那道闸要求已握手,而握手正是
 			// 这一帧要去换来的。写在 `next` 上而不是闭包里那个:意思是「这条连接的开场白」。
+			const bots = opts.bots();
 			write(next, {
 				type: "hello",
 				protocol: { ...BRIDGE_PROTOCOL_VERSION },
 				bridge: { kind: "koishi", name: "koishi", version: opts.version },
-				bots: opts.bots(),
+				bots,
 			});
+			// hello 报的全量名单也是这条连接上发出去的一份:不记的话,连上之后第一份一模一样的
+			// 名单又要推一遍 —— 每一次(重)连都是。记的是**发出去的那一份**,不再现取一次。
+			sentBots = JSON.stringify(bots);
 		});
 		next.addEventListener("message", (ev: { data?: unknown }) => {
 			/**
@@ -463,13 +480,7 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 
 	return {
 		connected: () => shook,
-		pushBots(bots) {
-			const snapshot = JSON.stringify(bots);
-			if (snapshot === sentBots) return;
-			// 没连上就不发 —— 名单是现取的,握手那一刻自然报的就是最新那份。发成了才记:
-			// 没发出去的那次要是也记下,连上之后第一份真名单就被自己咽了。
-			if (send({ type: "bots", bots })) sentBots = snapshot;
-		},
+		pushBots,
 		pushInbound(botId, platform, message) {
 			// 协议不补发:推一条三小时前的消息比不推更糟。
 			send({ type: "inbound", botId, platform, message });
