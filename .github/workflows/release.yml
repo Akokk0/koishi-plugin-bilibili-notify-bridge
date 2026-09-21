@@ -6,19 +6,29 @@ name: Release
 # 测试钉成一致(报给 BN 的就是后者),tag 只是「把这份代码发出去」的扳机 —— 三者对不上就停,
 # 不发一个自报家门与 npm 上不一致的包。
 #
-# 需要仓库 secret `NPM_TOKEN`(npm 的 automation token,要 Publish 权限)。provenance 还要求
-# package.json 的 repository.url 指向这个 GitHub 仓。
+# 发布走 npm 的 **Trusted Publisher**(OIDC),仓库里**没有任何 npm token**:npm 那边把这个包的
+# 发布许可绑在「Akokk0/koishi-plugin-bilibili-notify-bridge 的 release.yml、环境 npm」上,
+# GitHub 每次运行现换一张短期凭据。token 会过期、会失效(0.0.2 第一次发就被拒在 token 上,
+# npm 还把权限错误报成 404),也会泄露;OIDC 这几样都没有。
+#
+# - 环境 `npm` 在仓库设置里**只放行 `v*` tag**:分支上的运行即使改了这个文件也发不了包。
+# - 要 npm ≥ 11.5.1(下面现装)与 Node ≥ 22.14(.node-version 已满足)。
+# - provenance 随 OIDC 发布自动生成;它要求 package.json 的 repository.url 与这个仓一字不差。
+# - npm 上的 Trusted Publisher 配置建好就改不了,要改得删掉重建;上面那三样(仓库、文件名、
+#   环境名)任何一样改名,都得去 npm 那边重建一份。
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
-  id-token: write # npm provenance 要它来换 OIDC 凭据
+  id-token: write # Trusted Publisher 靠它换 OIDC 凭据(provenance 也是)
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # 🔴 npm 那边的 Trusted Publisher 绑的就是这个环境名;环境本身只放行 `v*` tag。
+    environment: npm
     steps:
       - uses: actions/checkout@v6
 
@@ -26,7 +36,7 @@ jobs:
         with:
           node-version-file: .node-version
           registry-url: https://registry.npmjs.org
-          cache: npm
+          # 发版不用缓存(npm 官方的建议):缓存被人动过的话,发出去的就不是这份代码构建的东西。
 
       - name: Tag must match package.json version
         run: |
@@ -45,7 +55,10 @@ jobs:
 
       - run: npm run build
 
+      # Trusted Publisher 要 npm ≥ 11.5.1,而 .node-version 那版 Node 自带的是 npm 10。只在发布前
+      # 换:门禁照旧用 CI 同一套。钉在 11 这一大版本上,别让一次大版本升级悄悄改了发布的行为。
+      - run: npm install -g npm@^11.5.1
+
       # 上面已经把门禁跑完了,prepublishOnly 是留给本机手发那一路的保险,这里不必再跑一遍。
-      - run: npm publish --provenance --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # 不带 token、不带 --provenance:凭据走 OIDC,provenance 随它自动生成。
+      - run: npm publish --access public --ignore-scripts
