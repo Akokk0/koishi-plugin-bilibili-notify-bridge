@@ -220,25 +220,36 @@ export function apply(ctx: Context, config: Config) {
 	// 插件后装、bot 已经在线的那一路 —— 事件不会补发。
 	for (const bot of ctx.bots) void probeMiniApp(bot);
 
+	/**
+	 * 🔴 **什么都不许同步抛出去。** cordis 的 `emit` 不隔离各监听者的异常(`Array.from` 一个
+	 * generator,抛了就停):我们这儿抛一下,同一条消息后面的监听者全被跳过 —— koishi 自己的
+	 * 指令 / 中间件也挂在 `message` 上,桥的一个 bug 就能让主人的机器人对这条消息装聋。
+	 */
 	ctx.on("message", (session) => {
-		// 过滤在这一侧做(协议 §8),省的是带宽与隐私;群白名单那种策略仍归 BN 判。
-		const message = inboundOf(
-			{
-				platform: session.platform,
-				selfId: session.selfId,
-				userId: session.userId,
-				channelId: session.channelId,
-				isDirect: session.isDirect,
-				content: session.content ?? "",
-				// 分享卡(`json` / `xml` 段)只在元素里看得见,正文里没有。
-				elements: session.elements ?? [],
-			},
-			subscription,
-			// 「发这条的是不是我们借出去的某个 bot」—— 查 koishi 自己那张按 `botId` 索引的表,
-			// 现查不缓存:主人随时会在 koishi 里加一个 bot。
-			(platform, userId) => ctx.bots[sidOf({ platform, selfId: userId })] !== undefined,
-		);
-		if (!message) return;
-		client.pushInbound(session.sid, session.platform, message);
+		try {
+			// 过滤在这一侧做(协议 §8),省的是带宽与隐私;群白名单那种策略仍归 BN 判。
+			const message = inboundOf(
+				{
+					platform: session.platform,
+					selfId: session.selfId,
+					userId: session.userId,
+					channelId: session.channelId,
+					isDirect: session.isDirect,
+					content: session.content ?? "",
+					// 分享卡(`json` / `xml` 段)只在元素里看得见,正文里没有。
+					elements: session.elements ?? [],
+				},
+				subscription,
+				// 「发这条的是不是我们借出去的某个 bot」—— 查 koishi 自己那张按 `botId` 索引的表,
+				// 现查不缓存:主人随时会在 koishi 里加一个 bot。
+				(platform, userId) => ctx.bots[sidOf({ platform, selfId: userId })] !== undefined,
+			);
+			if (!message) return;
+			client.pushInbound(session.sid, session.platform, message);
+		} catch (err) {
+			log.error(
+				`看这条消息时出错了(${reasonOf(err)}),没回传 —— 这是插件自己的 bug,烦请拿这行去提个 issue`,
+			);
+		}
 	});
 }
