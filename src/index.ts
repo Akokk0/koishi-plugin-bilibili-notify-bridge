@@ -15,7 +15,7 @@ import { botsOf, sidOf } from "./bots";
 import { capabilitiesFor } from "./capabilities";
 import { createBridgeClient } from "./client";
 import { deliverSend } from "./deliver";
-import { DIRECT, fetchImage } from "./fetch-image";
+import { type BlobOrigin, blobOriginOf, DIRECT, fetchImage } from "./fetch-image";
 import { inboundOf } from "./inbound";
 import { arkRequestOf, arkToSegmentData, readMiniAppProbe } from "./onebot";
 import { shouldProbe } from "./probe";
@@ -50,6 +50,20 @@ export const Config: Schema<Config> = Schema.object({
 
 export function apply(ctx: Context, config: Config) {
 	const log = ctx.logger(name);
+	/**
+	 * BN 取图口所在的源 —— 取图那道闸只放行它底下的取图口,别的一律得是公网地址
+	 * (`fetch-image.ts`)。它就在桥连过去的那个地址上,所以从配置里的地址算。
+	 *
+	 * 算不出来(地址不是 ws(s) / http(s)、没有主机名 …)就**什么都不做**,只说一句该改哪儿:
+	 * 这样的地址本来也连不上 BN,留着它只会每隔几十秒刷一行「连不上」。
+	 */
+	let origin: BlobOrigin;
+	try {
+		origin = blobOriginOf(config.url);
+	} catch (err) {
+		log.warn(`${reasonOf(err)}。在插件配置里改好桥接地址(BN 拓展页上有得抄),再重载插件`);
+		return;
+	}
 	/**
 	 * BN 要什么入站消息 —— **握手前一条都不驮**。默认就该是「什么都不要」:连上之前把
 	 * 群消息传出去,等于在用户还没同意时就上传了他的聊天。
@@ -183,7 +197,8 @@ export function apply(ctx: Context, config: Config) {
 				},
 				// 🔴 图必须**桥自己下载**(协议 §9):那条 URL 只保证桥自己可达,BN 常跑在
 				// NAS 上,交给平台去拉是静默失败。
-				fetchImage: (url) => fetchImage(ctx.http, url),
+				// 🔴 只取 BN 的取图口与公网地址(`origin`),每一跳都判 —— 见 `fetch-image.ts`。
+				fetchImage: (url) => fetchImage(ctx.http, url, { origin }),
 			}),
 		log: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
 		later: (fn, ms) => ctx.setTimeout(fn, ms),
