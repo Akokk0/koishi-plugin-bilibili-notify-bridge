@@ -7,7 +7,7 @@
  */
 
 import h from "@satorijs/element";
-import { imageUrlsIn, renderMessage, type RenderedImage } from "./message";
+import { imageUrlsIn, renderMessage, type RenderedImage, saysSomething } from "./message";
 import { type BridgeCapabilityReport, type BridgeSendFrame, reasonOf } from "./protocol";
 
 /** koishi 的 `Bot` 上我们真用到的那几格。 */
@@ -47,6 +47,9 @@ export interface DeliverDeps {
 	 */
 	whyUnwanted(): string | undefined;
 }
+
+/** 渲染出来什么都没说时回给 BN 的那句。 */
+const EMPTY_PUSH = "这条推送是空的(没有文字也没有图),没往群里发";
 
 export async function deliverSend(
 	frame: BridgeSendFrame,
@@ -101,6 +104,9 @@ export async function deliverSend(
 			atAll: capabilities.atAll === "supported",
 			forward: capabilities.forward === "supported",
 		});
+		// 🔴 空的不交给适配器:它们碰到空内容静默 return,回执 ok 而群里什么都没有(见
+		// `saysSomething`)。`sendMessage` 回空数组**不**算失败 —— 有的适配器本来就不回 id。
+		if (!saysSomething(content)) return { ok: false, err: EMPTY_PUSH };
 		await sendTo(bot, frame, content, deps.whyUnwanted);
 		return { ok: true };
 	} catch (err) {

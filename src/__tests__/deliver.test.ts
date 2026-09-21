@@ -273,6 +273,61 @@ describe("BN 已经不要了", () => {
 	});
 });
 
+/**
+ * 🔴 **空推送判失败,不交给适配器。** 三大适配器碰到空内容都是静默 return、不报错 —— BN 的
+ * 推送历史记成功,群里什么都没有。空推送是 BN 那头的事,得让主人在历史里看见。
+ */
+describe("空推送", () => {
+	const empties: Array<[string, unknown]> = [
+		["空文字", { kind: "text", text: "" }],
+		["只有空白", { kind: "text", text: "  \n\t " }],
+		["没有段的复合消息", { kind: "composite", segments: [] }],
+		["复合消息只有空白文字", { kind: "composite", segments: [{ type: "text", text: " " }] }],
+		["一张图都没有的合并转发", { kind: "forward-images", images: [], forward: true }],
+		["一张图都没有、也不合并", { kind: "forward-images", images: [], forward: false }],
+	];
+	for (const [label, message] of empties) {
+		it(`${label} → 回失败,一个字都不发`, async () => {
+			const d = deps({ capabilitiesOf: () => capabilitiesFor("onebot") });
+			const out = await deliverSend(frame({ platform: "onebot", message }), d.deps);
+			assert.deepEqual(out, {
+				ok: false,
+				err: "这条推送是空的(没有文字也没有图),没往群里发",
+			});
+			assert.equal(d.sent.length, 0, "把一条空消息交给适配器了");
+		});
+	}
+
+	/** 只 @全体 也是说了话 —— 真 @ 还是降成文字,都不算空。 */
+	it("只有 @全体 的不算空", async () => {
+		for (const platform of ["onebot", "discord"]) {
+			const d = deps({ capabilitiesOf: () => capabilitiesFor(platform) });
+			const out = await deliverSend(
+				frame({ platform, message: { kind: "composite", segments: [{ type: "at-all" }] } }),
+				d.deps,
+			);
+			assert.deepEqual(out, { ok: true }, `${platform} 上只 @全体 被当成空的了`);
+		}
+	});
+
+	it("只有一张图的不算空", async () => {
+		const d = deps();
+		const out = await deliverSend(
+			frame({
+				message: { kind: "forward-images", images: [{ url: "http://bn/blob/a" }], forward: true },
+			}),
+			d.deps,
+		);
+		assert.deepEqual(out, { ok: true });
+	});
+
+	/** 有的适配器本来就不回消息 id —— 回一个空数组不等于没发出去。 */
+	it("适配器回了个空数组 → 照样算发出去了", async () => {
+		const d = deps({ botOf: () => ({ sendMessage: async () => [] }) });
+		assert.deepEqual(await deliverSend(frame(), d.deps), { ok: true });
+	});
+});
+
 describe("发不出去", () => {
 	it("名单里没有这个 bot → 说清楚是哪个", async () => {
 		const out = await deliverSend(frame(), deps({ botOf: () => undefined }).deps);

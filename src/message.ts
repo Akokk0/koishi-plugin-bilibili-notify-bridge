@@ -80,6 +80,29 @@ export function imageUrlsIn(message: BridgeMessage): string[] {
 	}
 }
 
+/**
+ * 渲染出来的这些元素**说没说东西**:有图、有 @、有带子节点的合并转发,或者有 trim 之后
+ * 不为空的文字,才算说了。
+ *
+ * 🔴 空的**不能交给适配器**:onebot / discord / telegram 碰到空内容都是静默 return、不报错 ——
+ * BN 的推送历史记成功,群里什么都没有。空推送是 BN 那头的事,得变成一条失败回执让主人看见。
+ */
+export function saysSomething(elements: readonly h[]): boolean {
+	return elements.some((element) => {
+		switch (element.type) {
+			case "img":
+			case "at":
+				return true;
+			case "figure":
+				return element.children.length > 0;
+			case "text":
+				return String(element.attrs.content ?? "").trim() !== "";
+			default:
+				return false;
+		}
+	});
+}
+
 export function renderMessage(message: BridgeMessage, ctx: RenderContext): h[] {
 	switch (message.kind) {
 		case "text":
