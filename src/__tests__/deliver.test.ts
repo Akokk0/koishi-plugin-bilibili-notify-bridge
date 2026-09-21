@@ -45,6 +45,8 @@ function deps(over: Record<string, unknown> = {}) {
 			// 投递这一层不再自己算能力表(那会变成第二个来源)—— 接线那头喂的就是报给 BN
 			// 的那一份,这里照做。
 			capabilitiesOf: (_botId: string, platform: string) => capabilitiesFor(platform),
+			// BN 一直要着 —— 「不要了」那几条自己覆盖它。
+			whyUnwanted: () => undefined,
 			...over,
 		} as never,
 	};
@@ -219,6 +221,55 @@ describe("取图", () => {
 		assert.deepEqual(out, { ok: true });
 		assert.ok(d.sent[0]?.content.includes("data:image/jpeg;base64,"), d.sent[0]?.content);
 		assert.ok(!d.sent[0]?.content.includes("base64://"), "落到已废弃的 base64:// 了");
+	});
+});
+
+/**
+ * 🔴 **已经没人要的投递,发进群之前最后再问一次。** 投递要花时间(下图、签卡 —— 签卡调的是
+ * 适配器接口,插件收摊管不到它),等它回来 BN 可能早判了失败:插件停了、连接换了、过了 30 秒
+ * 的回执窗口。这时照发,主人重推一次,群里就是两张。
+ */
+describe("BN 已经不要了", () => {
+	it("取图期间变成不要了 → 不发,回失败并说清为什么", async () => {
+		let why: string | undefined;
+		const d = deps({
+			fetchImage: async () => {
+				why = "连接换过了";
+				return { data: PNG, mime: "image/png" };
+			},
+			whyUnwanted: () => why,
+		});
+		const out = await deliverSend(
+			frame({ message: { kind: "image", url: "http://bn/blob/a", mime: "image/png" } }),
+			d.deps,
+		);
+		assert.equal(out.ok, false);
+		assert.match(String(out.err), /连接换过了/);
+		assert.equal(d.sent.length, 0, "BN 都不要了还往群里发");
+	});
+
+	/** 签卡是最慢、也最管不住的那一步:签回来的卡照样得问一次。 */
+	it("签卡期间变成不要了 → 真卡、降级的文字都不发", async () => {
+		for (const signed of ['{"app":"com.tencent.miniapp_01"}', null]) {
+			let why: string | undefined;
+			const d = deps({
+				signMiniApp: async () => {
+					why = "插件停了";
+					return signed;
+				},
+				whyUnwanted: () => why,
+			});
+			const out = await deliverSend(frame({ message: MINIAPP_CARD }), d.deps);
+			assert.equal(out.ok, false);
+			assert.match(String(out.err), /插件停了/);
+			assert.equal(d.sent.length, 0, `签卡回来是 ${signed} 时还是发了`);
+		}
+	});
+
+	it("一直有人要 → 照常发", async () => {
+		const d = deps({ whyUnwanted: () => undefined });
+		assert.deepEqual(await deliverSend(frame(), d.deps), { ok: true });
+		assert.equal(d.sent.length, 1);
 	});
 });
 

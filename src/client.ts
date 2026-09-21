@@ -41,8 +41,16 @@ export interface BridgeClientOptions {
 	bots(): BridgeBotWire[];
 	/** 这个插件的版本,报给 BN 排障用。 */
 	version: string;
-	/** 把一条 `send` 真发出去。**永远不该抛** —— 抛了也会被接住并回一条失败回执。 */
-	deliver(frame: BridgeSendFrame): Promise<{ ok: boolean; err?: string }>;
+	/**
+	 * 把一条 `send` 真发出去。**永远不该抛** —— 抛了也会被接住并回一条失败回执。
+	 *
+	 * `whyUnwanted` 是问口:BN 还要这条就回 `undefined`,不要了(插件停了 / 连接换了 / 过了回执
+	 * 窗口)回为什么。投递**每一次往群里发之前**都该问它。
+	 */
+	deliver(
+		frame: BridgeSendFrame,
+		whyUnwanted: () => string | undefined,
+	): Promise<{ ok: boolean; err?: string }>;
 	/** BN 说它要什么入站消息。每次握手都会重新下发。 */
 	onWelcome(subscription: BridgeInboundSubscription): void;
 	/**
@@ -269,26 +277,23 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 	}
 
 	/**
-	 * 排队轮到的这条 `send`,BN 那边是不是已经判了失败。是就记一行、回 `true`:不投递、不回执。
+	 * 这条 `send` BN 还要不要:要就回 `undefined`,不要了回为什么。三种不要 —— 插件停了、收到
+	 * 它的那条连接没了(断线那一刻 BN 已经把在飞的全部判了失败,协议 §5.4)、过了 BN 的回执窗口。
 	 *
-	 * 🔴 判了失败的推送,主人可能已经人工重推了 —— 这时再发,同一条推送在群里出现两次。
+	 * 🔴 判了失败的推送,主人可能已经人工重推了 —— 这时再发,同一条推送在群里出现两次。所以问
+	 * 两回:排队轮到时问一次(`onSend`),投递往群里发之前再问一次(交给 `deliver` 的那个问口 ——
+	 * 下图、签卡都要花时间,签卡调的还是适配器接口,收摊管不到它)。
 	 */
-	function gaveUpOn(target: SocketLike, frame: BridgeSendFrame, receivedAt: number): boolean {
-		if (disposed) return true;
+	function whyUnwanted(target: SocketLike, receivedAt: number): string | undefined {
+		if (disposed) return "插件停了";
 		if (socket !== target) {
-			opts.log.info(
-				`推送 ${frame.id} 排队时连接断过,不发了:断线那一刻 BN 已经把它判了失败(协议 §5.4),再发会和人工重推撞车`,
-			);
-			return true;
+			return "收到它的那条连接断过,断线那一刻 BN 已经把它判了失败(协议 §5.4)";
 		}
 		const waited = now() - receivedAt;
 		if (waited >= SEND_RESULT_WINDOW_MS) {
-			opts.log.info(
-				`推送 ${frame.id} 排队等了 ${waited}ms,不发了:BN 最多等 ${SEND_RESULT_WINDOW_MS}ms 回执,已经判它失败了,再发会和人工重推撞车`,
-			);
-			return true;
+			return `等了 ${waited}ms,过了 BN 的 ${SEND_RESULT_WINDOW_MS}ms 回执窗口,它已经判了失败`;
 		}
-		return false;
+		return undefined;
 	}
 
 	async function onSend(target: SocketLike, frame: BridgeSendFrame, receivedAt: number): Promise<void> {
@@ -296,8 +301,13 @@ export function createBridgeClient(opts: BridgeClientOptions): BridgeClient {
 		if (!(await slots.acquire())) return;
 		let outcome: { ok: boolean; err?: string };
 		try {
-			if (gaveUpOn(target, frame, receivedAt)) return;
-			outcome = await opts.deliver(frame);
+			const why = whyUnwanted(target, receivedAt);
+			if (why !== undefined) {
+				// 不投递、也不回执(BN 那边已经记了账)。记一行:这是主人唯一看得见这条去向的地方。
+				opts.log.info(`推送 ${frame.id} 排队轮到时不发了:${why} —— 再发会和人工重推撞车`);
+				return;
+			}
+			outcome = await opts.deliver(frame, () => whyUnwanted(target, receivedAt));
 		} catch (err) {
 			// 抛了也得回执 —— 见文件头那条。
 			outcome = { ok: false, err: reasonOf(err) };

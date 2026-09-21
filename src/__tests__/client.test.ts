@@ -452,6 +452,54 @@ describe("投递名额", () => {
 		assert.ok(g.started.includes("s-99"), "没排满窗口的那条被错杀了");
 	});
 
+	/**
+	 * 在投的那条(已经拿到名额、正在下图 / 签卡)也得问得到「BN 还要不要」:client 给投递一个
+	 * 问口,投递在往群里发之前问它。三种不要:插件停了、连接换了、过了回执窗口。
+	 */
+	it("在投的那条问得到 BN 还要不要:收摊 / 换连接 / 过了回执窗口都回一句为什么", async () => {
+		const asks: Array<() => string | undefined> = [];
+		let clock = 0;
+		const c = connect({
+			deliver: (_frame: unknown, whyUnwanted: () => string | undefined) => {
+				asks.push(whyUnwanted);
+				return new Promise(() => {});
+			},
+			now: () => clock,
+		});
+		sockets[0]?.say(sendOf(0));
+		await settle();
+		const [ask] = asks;
+		assert.ok(ask, "投递没拿到问口");
+		assert.equal(ask(), undefined, "刚收到的一条就说不要了");
+
+		clock += SEND_RESULT_WINDOW_MS - 1;
+		assert.equal(ask(), undefined);
+		clock += 1;
+		assert.match(String(ask()), /回执/, "过了回执窗口还说要");
+
+		// 换一条连接:收到它的那条已经没了。
+		clock = 0;
+		sockets[0]?.say(sendOf(1));
+		await settle();
+		const second = asks[1];
+		assert.ok(second);
+		assert.equal(second(), undefined);
+		sockets[0]?.fire("close", { code: 1006 });
+		fireTimer();
+		sockets[1]?.fire("open");
+		sockets[1]?.say(WELCOME);
+		assert.match(String(second()), /连接/, "连接换过了还说要");
+
+		// 收摊。
+		sockets[1]?.say(sendOf(2));
+		await settle();
+		const third = asks[2];
+		assert.ok(third);
+		assert.equal(third(), undefined);
+		c.dispose();
+		assert.match(String(third()), /插件停了/, "收摊之后还说要");
+	});
+
 	/** 收摊了,排着的就不该再投 —— 插件都卸载了还在往群里发。 */
 	it("收摊时排队的全部放掉,不投递", async () => {
 		const g = gated();

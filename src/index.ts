@@ -148,8 +148,10 @@ export function apply(ctx: Context, config: Config) {
 		onDisconnect: () => {
 			subscription = NO_INBOUND;
 		},
-		deliver: (frame) =>
+		deliver: (frame, whyUnwanted) =>
 			deliverSend(frame, {
+				// 往群里发之前最后问一次 BN 还要不要 —— 下图、签卡回来时它可能早判了失败。
+				whyUnwanted,
 				botOf: botBySid,
 				// 报给 BN 的那份能力表(`bots.ts` 拼名单时用的是同一个表达式),不让投递那一层
 				// 自己再算一遍 —— 两份漂开了,面板说的和真发时按的就是两回事。

@@ -38,6 +38,14 @@ export interface DeliverDeps {
 	 * 那个接口、或者腾讯拒了)。没接这个口的平台压根不给。
 	 */
 	signMiniApp?(botId: string, card: Extract<BridgeSendFrame["message"], { kind: "miniapp-card" }>): Promise<string | null>;
+	/**
+	 * BN 还要不要这条:要就回 `undefined`,不要了(插件停了 / 连接换了 / 过了回执窗口)回为什么。
+	 *
+	 * 🔴 **每一次往群里发之前都问一次**(`sendTo` 开头)。下图、签卡都要花时间 —— 签卡调的是
+	 * 适配器接口,插件收摊管不到它 —— 等它回来 BN 可能早判了失败,主人已经重推了:照发,群里
+	 * 就是两张。
+	 */
+	whyUnwanted(): string | undefined;
 }
 
 export async function deliverSend(
@@ -83,7 +91,7 @@ export async function deliverSend(
 		if (frame.message.kind === "miniapp-card" && deps.signMiniApp) {
 			const data = await deps.signMiniApp(frame.botId, frame.message);
 			if (data !== null) {
-				await sendTo(bot, frame, [h("onebot:json", { data })]);
+				await sendTo(bot, frame, [h("onebot:json", { data })], deps.whyUnwanted);
 				return { ok: true };
 			}
 		}
@@ -93,7 +101,7 @@ export async function deliverSend(
 			atAll: capabilities.atAll === "supported",
 			forward: capabilities.forward === "supported",
 		});
-		await sendTo(bot, frame, content);
+		await sendTo(bot, frame, content, deps.whyUnwanted);
 		return { ok: true };
 	} catch (err) {
 		// 原因**不在这儿截**:回执的出口(`client.ts`)统一截一次。
@@ -101,8 +109,20 @@ export async function deliverSend(
 	}
 }
 
-/** 私聊走私聊那条口,别的走频道那条。`parentAddress` 是论坛话题 / 子频道的上级。 */
-async function sendTo(bot: SendableBot, frame: BridgeSendFrame, content: unknown): Promise<void> {
+/**
+ * 私聊走私聊那条口,别的走频道那条。`parentAddress` 是论坛话题 / 子频道的上级。
+ *
+ * 开头先问一次 BN 还要不要(`whyUnwanted`)—— 问在这儿,而不是调用方各问各的:往群里发只有
+ * 这一个口,闸长在口上,哪天多一条发送的路也漏不掉。
+ */
+async function sendTo(
+	bot: SendableBot,
+	frame: BridgeSendFrame,
+	content: unknown,
+	whyUnwanted: () => string | undefined,
+): Promise<void> {
+	const why = whyUnwanted();
+	if (why !== undefined) throw new Error(`没往群里发:BN 已经不要这条了(${why})`);
 	if (frame.target.scope === "private") {
 		// 🔴 闸判的是 `createDirectChannel`,**不是** `sendPrivateMessage`:后者 satori 的 `Bot`
 		// 基类永远给,判它等于没判。没有私聊的平台缺的是前者,而它缺席时 koishi 抛的是
